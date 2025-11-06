@@ -180,6 +180,13 @@ class RQVAE_EMBED_CLIP(nn.Module):
         return code, all_distances
 
     @torch.no_grad()
+    def get_sorted_index(self, xs):
+        z_e = self.rq_model.encode(xs)
+        _, _, code, _, _, _, _, _, all_distances = self.rq_model.quantizer(z_e)
+        sorted_indices = torch.argsort(all_distances[-1], dim=-1) # level 3
+        return code, sorted_indices
+
+    @torch.no_grad()
     def get_soft_codes(self, xs, temp=1.0, stochastic=False):
         assert hasattr(self.quantizer, 'get_soft_codes')
 
