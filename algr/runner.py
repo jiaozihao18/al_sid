@@ -147,6 +147,7 @@ class Runner:
             else:
                 dataset = load_dataset(dataset_name, data_files=data_file, split="train", streaming=self.config.streaming)
             print("🔄 processing dataset...")
+            dataset = dataset.filter(self.preprocess_function.filter_fn)
             tokenized_train = dataset.map(self.preprocess_function, batched=False, remove_columns=["system", "user", "answer"])
             return tokenized_train, None
         else:
@@ -158,6 +159,7 @@ class Runner:
                 dataset = load_dataset(dataset_name, data_files=data_file, split="all")
             print("🔄 processing dataset...")
             #tokenized_test = dataset["test"].map(self.preprocess_function, batched=False, remove_columns=["instruction", "input", "output"])
+            dataset = dataset.filter(self.preprocess_function.filter_fn)
             tokenized_test = dataset.map(self.preprocess_function, batched=False)
             return None, tokenized_test
 

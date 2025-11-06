@@ -9,13 +9,23 @@ class T5DataProcess:
         self.max_target_length = custom_args.max_target_length
         self.tokenizer = tokenizer
         self.is_train = is_train
-        self.input_column = custom_args.input_column ##prompt
-        self.output_column = custom_args.output_column ##label
+        self.input_column = custom_args.input_column ##user
+        self.output_column = custom_args.output_column ##answer
         self.training_mode = custom_args.training_mode #training_mode
+
+    def filter_fn(self, example: Dict[str, Any]) -> bool:
+        """用于过滤无效样本：input_column 不为 None 且非空字符串"""
+        input_val = example.get(self.input_column)
+        answer_val = example.get(self.output_column)
+        return isinstance(input_val, str) and len(input_val.strip()) > 0  \
+            and isinstance(answer_val, str) and len(answer_val.strip()) > 0
 
     def __call__(self, example: Dict[str, Any]) -> Dict[str, List[int]]:
         # 提取字段
+        # print(example)
+        # print(self.input_column)
         input_text = example.get(self.input_column, "").strip()
+        #if input_text is None or input_text == "":
         output_text = example.get(self.output_column, "").strip()
         source_text = input_text
         source_inputs = self.tokenizer(

@@ -1,7 +1,6 @@
 #coding:utf-8
-from typing import List, Tuple
 from transformers.trainer_pt_utils import LabelSmoother
-
+from typing import List, Tuple, Dict, Any
 
 class QwenDataProcess:
     def __init__(self, custom_args, tokenizer, is_train):
@@ -11,9 +10,16 @@ class QwenDataProcess:
         self.tokenizer = tokenizer
         self.is_train = is_train
         self.instruction_column = custom_args.instruction_column ##system
-        self.input_column = custom_args.input_column ##prompt
-        self.output_column = custom_args.output_column ##label
+        self.input_column = custom_args.input_column ##user
+        self.output_column = custom_args.output_column ##answer
         self.training_mode = custom_args.training_mode #training_mode
+
+    def filter_fn(self, example: Dict[str, Any]) -> bool:
+        """用于过滤无效样本：input_column 不为 None 且非空字符串"""
+        input_val = example.get(self.input_column)
+        answer_val = example.get(self.output_column)
+        return isinstance(input_val, str) and len(input_val.strip()) > 0  \
+            and isinstance(answer_val, str) and len(answer_val.strip()) > 0
 
     def __call__(self, example):
         input = example[self.input_column]

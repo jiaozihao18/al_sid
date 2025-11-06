@@ -225,29 +225,30 @@ python infer_SID.py
    ```
 2. training scripts:
     ```
-    python -m torch.distributed.launch --nnodes=1 --nproc_per_node=4 runner.py --config=config/t5base_3layer_tiny.json
+    python -m torch.distributed.launch --nnodes=1 --nproc_per_node=4 runner.py --config=config/qwen2.5_05b_3layer_s1.json
     ```
 3. predict scripts:
     ```
-    python -m torch.distributed.launch --nnodes=1 --nproc_per_node=4 runner.py --config=config/generate_t5base_3layer_tiny.json
+    python -m torch.distributed.launch --nnodes=1 --nproc_per_node=4 runner.py --config=config/generate_qwen2.5_05b_3layer_tiny.json
     ```
 4. calculate Hitrate:
     ```
     # nebula test: python calc_hr.py --dataset_name=/home/admin/.cache/huggingface/modules/datasets_modules/datasets/AL-GR--AL-GR-Tiny/25dea07242891a2d --nebula
-    1. python calc_hr.py --item_sid_file=item_info/tiny_item_sid_final.csv --generate_file=logs/generate_t5base_3layer_tiny/output.jsonl
-    2. python calc_hr.py --item_sid_file=item_info/tiny_item_sid_final.csv --generate_file=logs/generate_qwen2.5_05b_3layer_tiny/output.jsonl --decoder_only
+    python calc_hr.py --item_sid_file=item_info/tiny_item_sid_final.csv --generate_file=logs/generate_qwen2.5_05b_3layer_tiny/output.jsonl --decoder_only
+    python calc_hr.py --item_sid_file=item_info/tiny_item_sid_final.csv --generate_file=logs/generate_t5base_3layer_tiny/output.jsonl
+    ```
+5. Running in the background
+    ```
+    nohup python -m torch.distributed.launch --nnodes=1 --nproc_per_node=16 runner.py --config=config/t5base_3layer_s1.json  >logs/t5base_3layer_s1/log.txt 2>&1 &
+    nohup python -m torch.distributed.launch --nnodes=1 --nproc_per_node=16 runner.py --config=config/qwen2.5_05b_3layer_s1.json  >logs/qwen2.5_05b_3layer_s1/log.txt 2>&1 &
     ```
 
 
 <!-- USAGE EXAMPLES -->
 <!-- ## Usage
-
 Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources. -->
-
 <!-- _For more examples, please refer to the [Documentation]()_ -->
-
 <!-- <p align="right">(<a href="#readme-top">back to top</a>)</p> -->
-
 
 
 <!-- ROADMAP -->
