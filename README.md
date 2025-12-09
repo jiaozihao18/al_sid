@@ -299,7 +299,7 @@ Distributed under the project_license. See `LICENSE.txt` for more information.
 
 <!-- CONTACT -->
 ## Contact
-If you have any questions or encounter difficulties, we welcome you to contact ours via [GitHub Issues](https://github.com/selous123/al_sid/issues). We aim to respond promptly and support you in quickly getting up and running with generative recommendation.
+If you have any questions or encounter difficulties, we welcome you to contact us via [GitHub Issues](https://github.com/selous123/al_sid/issues). We aim to respond promptly and support you in quickly getting up and running with generative recommendation.
 <!-- Your Name - [@twitter_handle](https://twitter.com/twitter_handle) - email@email_client.com -->
 <!-- Project Link: [https://github.com/selous123/al_sid](https://github.com/selous123/al_sid) -->
 <!-- <p align="right">(<a href="#readme-top">back to top</a>)</p> -->
@@ -309,14 +309,11 @@ If you have any questions or encounter difficulties, we welcome you to contact o
 Please cite the following paper if you find our code helpful.
 
 ```
-@misc{fu2025forge,
-      title={FORGE: Forming Semantic Identifiers for Generative Retrieval in Industrial Datasets}, 
-      author={Kairui Fu and Tao Zhang and Shuwen Xiao and Ziyang Wang and Xinming Zhang and Chenchi Zhang and Yuliang Yan and Junjun Zheng and Yu Li and Zhihong Chen and Jian Wu and Xiangheng Kong and Shengyu Zhang and Kun Kuang and Yuning Jiang and Bo Zheng},
-      year={2025},
-      eprint={2509.20904},
-      archivePrefix={arXiv},
-      primaryClass={cs.IR},
-      url={https://arxiv.org/abs/2509.20904}, 
+@article{fu2025forge,
+  title={FORGE: Forming Semantic Identifiers for Generative Retrieval in Industrial Datasets},
+  author={Fu, Kairui and Zhang, Tao and Xiao, Shuwen and Wang, Ziyang and Zhang, Xinming and Zhang, Chenchi and Yan, Yuliang and Zheng, Junjun and Li, Yu and Chen, Zhihong and others},
+  journal={arXiv preprint arXiv:2509.20904},
+  year={2025}
 }
 ```
 
