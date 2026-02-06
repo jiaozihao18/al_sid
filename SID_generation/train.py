@@ -590,8 +590,13 @@ def evaluate(model, data, cfg, device):
         
         # 在rank 0汇总
         if dist.get_rank() == 0:
-            all_codes = np.concatenate([codes.cpu().numpy() for codes in gathered_codes], axis=0)
-            codes_list = [all_codes[i] for i in range(len(all_codes))]
+            all_codes_list = []
+            for codes in gathered_codes:
+                codes_np = codes.cpu().numpy()
+                if len(codes_np) > 0:
+                    for i in range(len(codes_np)):
+                        all_codes_list.append(codes_np[i])
+            codes_list = all_codes_list
         else:
             codes_list = []
     
