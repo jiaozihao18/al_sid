@@ -141,13 +141,9 @@ def init_distributed_mode(cfg, args):
             raise ImportError('NPU 训练需要安装 torch_npu，且 device_type 为 npu。') from e
         torch.npu.set_device(cfg.dist.gpu)
         cfg.dist.dist_backend = 'hccl'
-        print('| distributed init (rank {}): {}, npu {}'.format(
-            cfg.dist.rank, cfg.dist.dist_url, cfg.dist.gpu), flush=True)
     else:
         torch.cuda.set_device(cfg.dist.gpu)
         cfg.dist.dist_backend = 'nccl'
-        print('| distributed init (rank {}): {}, gpu {}'.format(
-            cfg.dist.rank, cfg.dist.dist_url, cfg.dist.gpu), flush=True)
 
     # 使用 env:// 从环境变量读取 MASTER_ADDR、MASTER_PORT、RANK、WORLD_SIZE
     # 对于 NPU，backend 为 'hccl'；对于 CUDA，backend 为 'nccl'

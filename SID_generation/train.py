@@ -111,6 +111,101 @@ def create_model(config):
     return model_instance
 
 
+def compute_codebook_utilization(model, device):
+    """
+    计算每层码本的利用率（使用的code数量 / 总code数量）
+    返回每层的利用率字典
+    
+    计算负担：极小，只是读取EMA统计值，无额外前向传播
+    """
+    utilization_stats = {}
+    
+    # 获取quantizer
+    if hasattr(model, 'module'):
+        quantizer = model.module.rq_model.quantizer
+    else:
+        quantizer = model.rq_model.quantizer
+    
+    # 遍历所有codebook
+    for i, codebook in enumerate(quantizer.codebooks):
+        if hasattr(codebook, 'cluster_size_ema'):
+            # 计算被使用的code数量（cluster_size_ema > 阈值）
+            # cluster_size_ema 已经在训练过程中通过EMA更新，无需额外计算
+            used_codes = (codebook.cluster_size_ema > 1e-6).sum().item()
+            total_codes = codebook.n_embed
+            utilization = used_codes / total_codes if total_codes > 0 else 0.0
+            
+            utilization_stats[f'codebook_{i}_utilization'] = utilization
+            utilization_stats[f'codebook_{i}_used_codes'] = used_codes
+            utilization_stats[f'codebook_{i}_total_codes'] = total_codes
+    
+    return utilization_stats
+
+
+def compute_collision_rate(codes_list, sample_ratio=1.0):
+    """
+    计算商品冲突率（unique code数量 / 总商品数）
+    
+    定义：一个商品用所有层码本表示为一个完整的code，冲突率 = unique code数量 / 总商品数
+    - 如果所有商品都有不同的code，冲突率 = 1.0（100%的商品都有unique code）
+    - 如果有商品共享相同的code，冲突率 < 1.0
+    
+    Args:
+        codes_list: list, code数组的列表，每个code shape: [h, w, codebook_num]，包含所有层的码本
+        sample_ratio: float, 采样比例，用于减少计算负担（默认1.0表示全部统计）
+    
+    Returns:
+        dict: 包含冲突率的字典
+    
+    计算负担：中等，需要遍历所有item统计code分布
+    可以通过sample_ratio参数降低计算量（如0.1表示只统计10%的数据）
+    """
+    if not codes_list:
+        return {}
+    
+    # 采样以减少计算负担
+    if sample_ratio < 1.0:
+        import random
+        sample_size = max(1, int(len(codes_list) * sample_ratio))
+        codes_list = random.sample(codes_list, sample_size)
+    
+    num_items = len(codes_list)
+    
+    # 统计每个商品对应的完整code（包含所有层码本）
+    # 将每个商品的完整code转换为可哈希的类型（tuple）
+    unique_codes = set()
+    code_to_count = {}  # 用于统计每个code出现的次数
+    
+    for code in codes_list:
+        # code shape: [h, w, codebook_num]，包含所有层的码本
+        # 将完整的code转换为可哈希的类型（tuple）
+        if isinstance(code, torch.Tensor):
+            code_tuple = tuple(code.flatten().cpu().numpy().tolist())
+        elif isinstance(code, np.ndarray):
+            code_tuple = tuple(code.flatten().tolist())
+        else:
+            code_tuple = tuple(code) if isinstance(code, (list, tuple)) else (code,)
+        
+        unique_codes.add(code_tuple)
+        code_to_count[code_tuple] = code_to_count.get(code_tuple, 0) + 1
+    
+    # 冲突率 = unique code数量 / 总商品数
+    unique_code_count = len(unique_codes)
+    collision_rate = unique_code_count / num_items if num_items > 0 else 0.0
+    
+    # 统计有冲突的商品数（多个商品共享相同code）
+    collided_items = sum(count - 1 for count in code_to_count.values() if count > 1)
+    
+    collision_stats = {
+        'collision_rate': collision_rate,
+        'unique_codes': unique_code_count,
+        'total_items': num_items,
+        'collided_items': collided_items,  # 有冲突的商品数（共享code的商品数-1）
+    }
+    
+    return collision_stats
+
+
 def prepare_optimizer_and_scheduler(config, model_without_ddp):
     """Prepare the optimizer and learning rate scheduler"""
     effective_batch_size = config.data.batch_size * config.train.accum_iter * dist_utils.get_world_size()
@@ -268,6 +363,14 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
 
     model.train(True)
     accum_iter = cfg.train.accum_iter
+    
+    # 用于统计商品冲突率和码本利用率
+    # 统计频率从config读取，默认每10个epoch统计一次
+    stats_freq = getattr(cfg.train, 'stats_freq', 10)  # 每N个epoch统计一次
+    collision_sample_ratio = getattr(cfg.train, 'collision_sample_ratio', 0.1)
+    collect_stats = (stats_freq > 0 and (epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1))
+    # 如果每个epoch中每个item只出现一次，可以直接收集code列表，不需要item_id
+    codes_list = [] if (collect_stats and collision_sample_ratio > 0) else None
 
     dataloader, sampler = data['recon'].dataloader, data['recon'].sampler
     data_iter = iter(dataloader)
@@ -304,10 +407,25 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / num_batches_per_epoch + epoch, cfg)
 
         if select_idx == 0:
-
-            _, features = batch
+            # recon数据集：返回 (item_id, embedding)
+            item_ids, features = batch
             features = features.to(device, non_blocking=True)
             loss, recons, selected_index, loss_dict, feature_norm, quant_norm = model(features)
+            
+            # 收集code用于冲突率统计
+            # 如果每个epoch中每个item只出现一次，可以直接收集code列表，不需要item_id
+            if codes_list is not None:
+                with torch.no_grad():
+                    # 获取每个样本的code
+                    if hasattr(model, 'module'):
+                        codes = model.module.rq_model.get_codes(features)
+                    else:
+                        codes = model.rq_model.get_codes(features)
+                    # codes shape: [batch_size, h, w, codebook_num]
+                    codes_cpu = codes.cpu().numpy()
+                    # 直接收集code列表（每个epoch中每个item只出现一次，不需要item_id去重）
+                    for code in codes_cpu:
+                        codes_list.append(code)
 
             loss_value = loss.item()
 
@@ -390,6 +508,36 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
 
     metric_logger.synchronize_between_processes(device=device)
     dist_utils.main_print("Averaged stats:", metric_logger)
+    
+    # 计算码本利用率和商品冲突率（只在主进程计算，避免重复）
+    stats_freq = getattr(cfg.train, 'stats_freq', 10)  # 每N个epoch统计一次
+    if dist_utils.is_main_process() and (epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1):
+        model.eval()  # 设置为eval模式，确保使用EMA统计
+        
+        # 码本利用率：计算负担极小，只读取EMA统计值
+        utilization_stats = compute_codebook_utilization(model, device)
+        # 简化打印格式：codebook_0_utilization: 6475/8192=0.8234 (82.34%)
+        num_codebooks = len([k for k in utilization_stats.keys() if 'utilization' in k])
+        for i in range(num_codebooks):
+            used = int(utilization_stats.get(f'codebook_{i}_used_codes', 0))
+            total = int(utilization_stats.get(f'codebook_{i}_total_codes', 0))
+            utilization = utilization_stats.get(f'codebook_{i}_utilization', 0.0)
+            dist_utils.main_print(f"codebook_{i}_utilization: {used}/{total}={utilization:.4f} ({utilization*100:.2f}%)")
+        
+        # 商品冲突率统计
+        # 定义：一个商品用所有层码本表示为一个完整的code，冲突率 = unique code数量 / 总商品数
+        # 如果每个epoch中每个item只出现一次，可以直接用code列表统计，不需要item_id
+        if codes_list and len(codes_list) > 0:
+            sample_ratio = getattr(cfg.train, 'collision_sample_ratio', 0.1)  # 从config读取采样比例
+            collision_stats = compute_collision_rate(codes_list, sample_ratio=sample_ratio)
+            collision_rate = collision_stats.get('collision_rate', 0.0)
+            unique_codes = int(collision_stats.get('unique_codes', 0))
+            total_items = int(collision_stats.get('total_items', 0))
+            collided_items = int(collision_stats.get('collided_items', 0))
+            dist_utils.main_print(f"collision_rate: {unique_codes}/{total_items}={collision_rate:.4f} ({collision_rate*100:.2f}%), collided_items={collided_items}")
+        
+        model.train()  # 恢复训练模式
+    
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 

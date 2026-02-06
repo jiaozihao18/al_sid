@@ -55,6 +55,8 @@ train:
   neg_num: 0
   filter_lr: null
   filter_lr_name: ''
+  stats_freq: 10  # 每N个epoch统计一次码本利用率和商品冲突率（0表示禁用，只在最后一个epoch统计）
+  collision_sample_ratio: 0.1  # 商品冲突率统计的采样比例（0.0-1.0），0.1表示采样10%的数据
 
   lr_scheduler:
     name: cosine
