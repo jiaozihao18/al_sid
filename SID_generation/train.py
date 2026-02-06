@@ -111,6 +111,16 @@ def create_model(config):
     return model_instance
 
 
+def _to_numpy_array(x):
+    """统一转换为numpy数组"""
+    if isinstance(x, torch.Tensor):
+        return x.cpu().numpy()
+    elif isinstance(x, np.ndarray):
+        return x
+    else:
+        return np.array(x)
+
+
 def compute_codebook_utilization(codes_list, model):
     """
     计算每层码本的利用率（使用的code数量 / 总code数量）
@@ -123,62 +133,33 @@ def compute_codebook_utilization(codes_list, model):
     Returns:
         dict: 包含每层利用率的字典
     """
+    if not codes_list:
+        return {}
+    
+    # 获取quantizer和codebooks
+    quantizer = model.module.rq_model.quantizer if hasattr(model, 'module') else model.rq_model.quantizer
+    num_layers = len(quantizer.codebooks)
     utilization_stats = {}
     
-    if not codes_list:
-        return utilization_stats
-    
-    # 获取每层码本的总数
-    if hasattr(model, 'module'):
-        quantizer = model.module.rq_model.quantizer
-    else:
-        quantizer = model.rq_model.quantizer
-    
-    if not hasattr(quantizer, 'codebooks'):
-        return utilization_stats
-    
-    # 获取code的shape（假设所有code的shape相同）
-    sample_code = codes_list[0]
-    if isinstance(sample_code, np.ndarray):
-        if len(sample_code.shape) == 3:  # [h, w, codebook_num]
-            h, w, num_layers = sample_code.shape
-        else:
-            num_layers = sample_code.shape[-1] if len(sample_code.shape) > 1 else 1
-    else:
-        num_layers = len(sample_code) if isinstance(sample_code, (list, tuple)) else 1
+    # 统一转换为numpy数组，避免重复转换
+    codes_np = [_to_numpy_array(code) for code in codes_list]
     
     # 对每一层计算利用率
     for layer_idx in range(num_layers):
-        # 统计该层使用的unique code
         used_codes_set = set()
         
-        for code in codes_list:
-            # 提取第layer_idx层的code
-            if isinstance(code, np.ndarray):
-                if len(code.shape) == 3:  # [h, w, codebook_num]
-                    code_layer = code[:, :, layer_idx]
-                elif len(code.shape) == 2:  # [h*w, codebook_num]
-                    code_layer = code[:, layer_idx]
-                else:
-                    code_layer = code
-            elif isinstance(code, torch.Tensor):
-                code_layer = code[:, :, layer_idx] if len(code.shape) == 3 else code
+        for code in codes_np:
+            # 提取第layer_idx层的code: [h, w, codebook_num] -> [h, w]
+            if len(code.shape) == 3:
+                code_layer = code[:, :, layer_idx]
+            elif len(code.shape) == 2:
+                code_layer = code[:, layer_idx]
             else:
-                code_layer = code[layer_idx] if isinstance(code, (list, tuple)) else code
+                code_layer = code
             
-            # 将code转换为可哈希的类型（tuple），统计unique codes
-            if isinstance(code_layer, torch.Tensor):
-                code_layer_flat = code_layer.flatten().cpu().numpy()
-            elif isinstance(code_layer, np.ndarray):
-                code_layer_flat = code_layer.flatten()
-            else:
-                code_layer_flat = np.array(code_layer).flatten()
-            
-            # 统计该样本中使用的unique codes
-            unique_codes_in_sample = set(code_layer_flat.tolist())
-            used_codes_set.update(unique_codes_in_sample)
+            # 统计unique codes
+            used_codes_set.update(code_layer.flatten().tolist())
         
-        # 获取该层码本的总数
         total_codes = quantizer.codebooks[layer_idx].n_embed
         used_codes = len(used_codes_set)
         utilization = used_codes / total_codes if total_codes > 0 else 0.0
@@ -204,9 +185,6 @@ def compute_non_collision_rate(codes_list, sample_ratio=1.0):
     
     Returns:
         dict: 包含非冲突率的字典
-    
-    计算负担：中等，需要遍历所有item统计code分布
-    可以通过sample_ratio参数降低计算量（如0.1表示只统计10%的数据）
     """
     if not codes_list:
         return {}
@@ -217,41 +195,24 @@ def compute_non_collision_rate(codes_list, sample_ratio=1.0):
         sample_size = max(1, int(len(codes_list) * sample_ratio))
         codes_list = random.sample(codes_list, sample_size)
     
-    num_items = len(codes_list)
-    
-    # 统计每个商品对应的完整code（包含所有层码本）
-    # 将每个商品的完整code转换为可哈希的类型（tuple）
-    unique_codes = set()
-    code_to_count = {}  # 用于统计每个code出现的次数
-    
+    # 统一转换为numpy数组并转换为tuple（可哈希）
+    code_to_count = {}
     for code in codes_list:
-        # code shape: [h, w, codebook_num]，包含所有层的码本
-        # 将完整的code转换为可哈希的类型（tuple）
-        if isinstance(code, torch.Tensor):
-            code_tuple = tuple(code.flatten().cpu().numpy().tolist())
-        elif isinstance(code, np.ndarray):
-            code_tuple = tuple(code.flatten().tolist())
-        else:
-            code_tuple = tuple(code) if isinstance(code, (list, tuple)) else (code,)
-        
-        unique_codes.add(code_tuple)
+        code_np = _to_numpy_array(code)
+        code_tuple = tuple(code_np.flatten().tolist())
         code_to_count[code_tuple] = code_to_count.get(code_tuple, 0) + 1
     
-    # 非冲突率 = unique code数量 / 总商品数
-    unique_code_count = len(unique_codes)
+    num_items = len(codes_list)
+    unique_code_count = len(code_to_count)
     non_collision_rate = unique_code_count / num_items if num_items > 0 else 0.0
-    
-    # 统计有冲突的商品数（多个商品共享相同code）
     collided_items = sum(count - 1 for count in code_to_count.values() if count > 1)
     
-    non_collision_stats = {
+    return {
         'non_collision_rate': non_collision_rate,
         'unique_codes': unique_code_count,
         'total_items': num_items,
-        'collided_items': collided_items,  # 有冲突的商品数（共享code的商品数-1）
+        'collided_items': collided_items,
     }
-    
-    return non_collision_stats
 
 
 def prepare_optimizer_and_scheduler(config, model_without_ddp):
