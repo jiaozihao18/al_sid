@@ -121,14 +121,14 @@ def _to_numpy_array(x):
         return np.array(x)
 
 
-def compute_codebook_utilization(codes_list, model):
+def compute_codebook_utilization(codes_list, codebook_sizes):
     """
     计算每层码本的利用率（使用的code数量 / 总code数量）
     从实际训练数据中统计每一层码本的使用情况
     
     Args:
         codes_list: list, code数组的列表，每个code shape: [h, w, codebook_num]
-        model: 模型实例，用于获取每层码本的总数
+        codebook_sizes: list, 每层码本的大小列表，如 [8192, 8192, 8192]
     
     Returns:
         dict: 包含每层利用率的字典
@@ -136,9 +136,7 @@ def compute_codebook_utilization(codes_list, model):
     if not codes_list:
         return {}
     
-    # 获取quantizer和codebooks
-    quantizer = model.module.rq_model.quantizer if hasattr(model, 'module') else model.rq_model.quantizer
-    num_layers = len(quantizer.codebooks)
+    num_layers = len(codebook_sizes)
     utilization_stats = {}
     
     # 统一转换为numpy数组，避免重复转换
@@ -150,17 +148,11 @@ def compute_codebook_utilization(codes_list, model):
         
         for code in codes_np:
             # 提取第layer_idx层的code: [h, w, codebook_num] -> [h, w]
-            if len(code.shape) == 3:
-                code_layer = code[:, :, layer_idx]
-            elif len(code.shape) == 2:
-                code_layer = code[:, layer_idx]
-            else:
-                code_layer = code
-            
+            code_layer = code[:, :, layer_idx]
             # 统计unique codes
             used_codes_set.update(code_layer.flatten().tolist())
         
-        total_codes = quantizer.codebooks[layer_idx].n_embed
+        total_codes = codebook_sizes[layer_idx]
         used_codes = len(used_codes_set)
         utilization = used_codes / total_codes if total_codes > 0 else 0.0
         
@@ -529,7 +521,10 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             sample_ratio = getattr(cfg.train, 'collision_sample_ratio', 0.1)  # 从config读取采样比例
             
             # 码本利用率：统计每一层码本的使用率（使用的unique code数量 / 总code数量）
-            utilization_stats = compute_codebook_utilization(codes_list, model)
+            # 获取每层码本的大小
+            quantizer = model.module.rq_model.quantizer if hasattr(model, 'module') else model.rq_model.quantizer
+            codebook_sizes = [codebook.n_embed for codebook in quantizer.codebooks]
+            utilization_stats = compute_codebook_utilization(codes_list, codebook_sizes)
             if utilization_stats:
                 num_codebooks = len([k for k in utilization_stats.keys() if 'utilization' in k])
                 for i in range(num_codebooks):
