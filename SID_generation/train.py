@@ -546,10 +546,14 @@ def evaluate(model, data, cfg, device):
     
     # 创建评估用的dataloader（使用valid_batch_size）
     recon_dataset = data['recon'].dataset
-    recon_sampler = torch.utils.data.distributed.DistributedSampler(
-        recon_dataset, 
-        shuffle=False  # 评估时不需要shuffle
-    )
+    # 只在分布式模式下使用DistributedSampler
+    if dist.is_initialized():
+        recon_sampler = torch.utils.data.distributed.DistributedSampler(
+            recon_dataset, 
+            shuffle=False  # 评估时不需要shuffle
+        )
+    else:
+        recon_sampler = None
     eval_dataloader = torch.utils.data.DataLoader(
         recon_dataset,
         batch_size=eval_batch_size,
