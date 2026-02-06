@@ -48,6 +48,8 @@ eval: false
 resume: ''
 
 dist:
+  # 设备类型: 'cuda' 或 'npu'，后续代码均基于 device 变量，与具体设备解耦
+  device_type: 'cuda'
   distributed: False
   local_rank: -1
   world_size: 1

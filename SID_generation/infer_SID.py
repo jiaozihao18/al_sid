@@ -24,11 +24,35 @@ CKPT_PATH = 'output_model/checkpoint-7.pth'  # todo: 需要推理的ckpt
 INPUT_FILE_PATH = './item_feature/final/part_01.csv'  # todo: 输入的emb，可从https://huggingface.co/datasets/AL-GR/Item-EMB获取
 OUTPUT_FILE_PATH = 'inference_results_batch.csv'  # todo: 输出结果
 
+# 推理设备：'cuda' | 'npu' | 'cpu'，与训练时 device_type 一致即可
+INFER_DEVICE_TYPE = 'cuda'
 
-def build_model(ckpt_path: str) -> torch.nn.Module:
+
+def _infer_device(device_type: str) -> torch.device:
+    """根据前面指定的 device_type 返回推理设备，与训练保持一致。"""
+    dtype = (device_type or "cuda").strip().lower()
+    if dtype == "npu":
+        if getattr(torch, "npu", None) and torch.npu.is_available():
+            return torch.device("npu:0")
+        logging.warning("NPU 不可用，回退到 CPU")
+        return torch.device("cpu")
+    if dtype == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda:0")
+        logging.warning("CUDA 不可用，回退到 CPU")
+        return torch.device("cpu")
+    return torch.device("cpu")
+
+
+def build_model(ckpt_path: str, device_type: str = None) -> torch.nn.Module:
     """
     构建并加载预训练的RQ-VAE模型。
+    device_type: 与训练一致，'cuda' | 'npu' | 'cpu'，默认使用全局 INFER_DEVICE_TYPE。
     """
+    if device_type is None:
+        device_type = INFER_DEVICE_TYPE
+    device = _infer_device(device_type)
+
     logging.info("开始构建模型...")
     codebook_num = 3
     codebook_size = 8192
@@ -50,12 +74,10 @@ def build_model(ckpt_path: str) -> torch.nn.Module:
 
     try:
         model = RQVAE_EMBED_CLIP(hps, ddconfig=ddconfig, checkpointing=True)
-        # 确定设备
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
         model.eval()
 
-        logging.info(f"正在从 '{ckpt_path}' 加载模型权重...")
+        logging.info(f"正在从 '{ckpt_path}' 加载模型权重... (device={device})")
         state_dict = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(state_dict['model'], strict=False)
         logging.info("模型加载成功！")

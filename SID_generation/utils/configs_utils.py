@@ -90,6 +90,9 @@ def get_config(args):
     if hasattr(args, 'save_prefix') and len(args.save_prefix) > 0:
         cfg.data.save_prefix = args.save_prefix
 
+    if hasattr(args, 'device_type') and str(args.device_type).strip() != '':
+        cfg.dist.device_type = str(args.device_type).strip().lower()
+
     if hasattr(args, 'input_dim') and len(args.input_dim) > 0:
         cfg.model.input_dim = args.input_dim
         

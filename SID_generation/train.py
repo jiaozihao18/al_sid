@@ -41,7 +41,9 @@ def parse_arguments():
     parser.add_argument('--train_root', default='', help='Training data root directory')
     parser.add_argument('--epochs', default=0, type=int, help='Number of training epochs')
 
-    # 分布式训练参数
+    # 设备与分布式：在前面指定 device_type，后续代码设备无关
+    parser.add_argument('--device_type', default='', type=str, choices=['cuda', 'npu', ''],
+                        help='Device: cuda or npu. Default from config (default.yml).')
     parser.add_argument('--world_size', default=1, type=int, help='Number of distributed processes')
     parser.add_argument('--rank', default=0, type=int, help='')
     parser.add_argument('--gpu', default=0, type=int, help='')
@@ -144,12 +146,18 @@ def main():
 
     initialize_training_environment(args=args, config=cfg)
 
+    # 设备在入口统一指定，后续全部使用 device，与 cuda/npu 解耦
+    device = dist_utils.get_device(cfg)
+
     seed = cfg.seed + dist_utils.get_rank()
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = True
+    if device.type == 'cuda':
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = True
+    elif device.type == 'npu':
+        torch.npu.manual_seed(seed)
 
     OmegaConf.set_readonly(cfg, False)
     current_timestamp_seconds = int(time.time())
@@ -175,7 +183,7 @@ def main():
         model.load_state_dict(state_dict['model'], strict=True)
         cfg.train.start_epoch = state_dict['epoch'] + 1
 
-    model.cuda(cfg.dist.gpu)
+    model.to(device)
 
     model_without_ddp = model
     print(f"Model: {str(model_without_ddp)}")
@@ -189,6 +197,8 @@ def main():
             device_ids=[cfg.dist.gpu],
             find_unused_parameters=True
         )
+        # 保证 device 指向 DDP 所在设备
+        device = next(model.parameters()).device
 
         model_without_ddp = model.module
 
@@ -214,7 +224,7 @@ def main():
     start_time = time.time()
 
     for epoch in range(cfg.train.start_epoch, cfg.train.epochs):
-        train_stats = train_one_epoch(model, data, optimizer, epoch, cfg=cfg)
+        train_stats = train_one_epoch(model, data, optimizer, epoch, cfg=cfg, device=device)
         if cfg.output_dir and (epoch % 1 == 0 or epoch + 1 == cfg.train.epochs):
             checkpoint_save_info = {
                 'model': model_without_ddp.state_dict(),
@@ -240,22 +250,15 @@ def main():
 
 
 def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.Optimizer,
-                    epoch: int, cfg=None):
+                    epoch: int, cfg=None, device=None):
     """
-    Executes a training epoch
-
-    Parameters:
-    - `model`: Model to train
-    - `data`: Dictionary of data loaders
-    - `optimizer`: Optimizer to use
-    - `epoch`: Current training epoch number
-    - `cfg`: Configuration object
-
-    Return value:
-    - Dictionary of training statistics
+    Executes a training epoch.
+    device: 由入口 get_device(cfg) 传入，本函数内仅使用 .to(device)，与 cuda/npu 解耦。
     """
+    if device is None:
+        device = next(model.parameters()).device
 
-    metric_logger = logger.MetricLogger(delimiter="  ")
+    metric_logger = logger.MetricLogger(delimiter="  ", device=device)
     header = f'Epoch: [{epoch}]'
     print_freq = cfg.log_step
 
@@ -299,7 +302,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
         if select_idx == 0:
 
             _, features = batch
-            features = features.cuda(cfg.dist.gpu, non_blocking=True)
+            features = features.to(device, non_blocking=True)
             loss, recons, selected_index, loss_dict, feature_norm, quant_norm = model(features)
 
             loss_value = loss.item()
@@ -316,7 +319,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             lr = optimizer.param_groups[0]["lr"]
             lr2 = optimizer.param_groups[-1]["lr"]
 
-            torch.cuda.synchronize()
+            dist_utils.device_synchronize(device)
 
             log_metrics = {
                 f"loss/loss": loss_value,
@@ -330,8 +333,8 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
         # 对比
         else:
             _, features, _, tar_features = batch
-            features = features.cuda(cfg.dist.gpu, non_blocking=True)
-            tar_features = tar_features.cuda(cfg.dist.gpu, non_blocking=True)
+            features = features.to(device, non_blocking=True)
+            tar_features = tar_features.to(device, non_blocking=True)
             output = model(features, tar_features, return_clip_loss=True)
             loss = output['loss']
 
@@ -362,7 +365,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             loss.backward()
             optimizer.step()
 
-            torch.cuda.synchronize()
+            dist_utils.device_synchronize(device)
 
             lr = optimizer.param_groups[0]["lr"]
 
@@ -381,7 +384,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             }
             metric_logger.update(**log_metrics)
 
-    metric_logger.synchronize_between_processes()
+    metric_logger.synchronize_between_processes(device=device)
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 

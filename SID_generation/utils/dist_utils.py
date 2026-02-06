@@ -2,6 +2,9 @@
 """
 @author: Yingwu.XSW
 @date: 2022/3/9 下午6:35
+
+设备抽象：通过 cfg.dist.device_type 指定 'cuda' 或 'npu'，后续统一使用 get_device(cfg) 得到 device，
+模型与数据使用 .to(device)，同步使用 device_synchronize(device)，保持设备无关。
 """
 import os
 import shutil
@@ -10,6 +13,35 @@ import torch
 import torch.autograd as autograd
 import torch.distributed as dist
 from omegaconf import OmegaConf
+
+
+def _ensure_device_type(cfg):
+    """确保 dist 中有 device_type，默认 cuda。"""
+    if not hasattr(cfg.dist, 'device_type') or cfg.dist.device_type is None or cfg.dist.device_type == '':
+        cfg.dist.device_type = 'cuda'
+
+
+def get_device(cfg):
+    """
+    根据配置返回当前进程使用的 torch.device。
+    在训练入口调用一次，后续代码统一使用该 device，与 cuda/npu 解耦。
+    """
+    _ensure_device_type(cfg)
+    dtype = (cfg.dist.device_type or 'cuda').lower()
+    device_id = getattr(cfg.dist, 'gpu', 0)
+    if dtype == 'npu':
+        return torch.device(f'npu:{device_id}')
+    return torch.device(f'cuda:{device_id}')
+
+
+def device_synchronize(device):
+    """与设备无关的同步：cuda 调 cuda.synchronize，npu 调 npu.synchronize。"""
+    if device is None:
+        return
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    elif device.type == 'npu':
+        torch.npu.synchronize()
 
 
 def get_model(model):
@@ -71,6 +103,7 @@ def is_main_process():
 def init_distributed_mode(cfg, args):
     OmegaConf.set_struct(cfg, False)
     OmegaConf.set_readonly(cfg, False)
+    _ensure_device_type(cfg)
 
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         cfg.dist.rank = int(os.environ["RANK"])
@@ -83,15 +116,27 @@ def init_distributed_mode(cfg, args):
         return
 
     cfg.dist.distributed = True
-
-    torch.cuda.set_device(cfg.dist.gpu)
-    cfg.dist.dist_backend = 'nccl'
+    device_type = (cfg.dist.device_type or 'cuda').lower()
     cfg.dist.dist_url = args.dist_url
-    print('| distributed init (rank {}): {}, gpu {}'.format(cfg.dist.rank, cfg.dist.dist_url, cfg.dist.gpu), flush=True)
+
+    if device_type == 'npu':
+        try:
+            import torch_npu  # noqa: F401
+        except ImportError as e:
+            raise ImportError('NPU 训练需要安装 torch_npu，且 device_type 为 npu。') from e
+        torch.npu.set_device(cfg.dist.gpu)
+        cfg.dist.dist_backend = 'hccl'
+        print('| distributed init (rank {}): {}, npu {}'.format(
+            cfg.dist.rank, cfg.dist.dist_url, cfg.dist.gpu), flush=True)
+    else:
+        torch.cuda.set_device(cfg.dist.gpu)
+        cfg.dist.dist_backend = 'nccl'
+        print('| distributed init (rank {}): {}, gpu {}'.format(
+            cfg.dist.rank, cfg.dist.dist_url, cfg.dist.gpu), flush=True)
+
     torch.distributed.init_process_group(backend=cfg.dist.dist_backend)
     cfg.dist.rank = dist.get_rank()
     cfg.dist.world_size = dist.get_world_size()
-    # setup_for_distributed(args.rank == 0)
     OmegaConf.set_struct(cfg, True)
     OmegaConf.set_readonly(cfg, True)
 
@@ -188,33 +233,34 @@ def all_gather_batch_with_grad(tensors):
     return output_tensor
 
 
-def all_reduce_mean(x):
+def all_reduce_mean(x, device=None):
+    """device 由调用方传入，与 get_device(cfg) 一致，保持设备无关。"""
     world_size = get_world_size()
     if world_size > 1:
-        x_reduce = torch.tensor(x).cuda()
+        if device is None:
+            device = torch.device('cuda:0')  # 兼容旧调用
+        x_reduce = torch.tensor(x, dtype=torch.float64, device=device)
         dist.all_reduce(x_reduce)
         x_reduce /= world_size
         return x_reduce.item()
-    else:
-        return x
+    return x
 
 
-def all_reduce_mean_batch(args):
+def all_reduce_mean_batch(args, device=None):
     """
-    对输入的多个变量（张量）进行全局均值汇聚
-    :param args: 多个输入变量，可以是一个或多个张量
-    :return: 每个输入变量的全局均值
+    对输入的多个变量（张量）进行全局均值汇聚。
+    device 由调用方传入，与 get_device(cfg) 一致。
     """
     world_size = get_world_size()
     results = []
-
+    if device is None:
+        device = torch.device('cuda:0')
     for x in args:
         if world_size > 1:
-            x_reduce = torch.tensor(x).cuda()
+            x_reduce = torch.tensor(x, dtype=torch.float64, device=device)
             dist.all_reduce(x_reduce)
             x_reduce /= world_size
             results.append(x_reduce.item())
         else:
             results.append(x)
-
     return results

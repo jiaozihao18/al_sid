@@ -12,6 +12,26 @@ import torch.distributed as dist
 from .dist_utils import is_dist_avail_and_initialized
 
 
+def _get_device_for_tensor(device):
+    """返回用于 all_reduce 等通信的 device，保证与后端一致。"""
+    if device is None:
+        return torch.device('cuda:0')
+    return device
+
+
+def get_device_memory_mb(device):
+    """与设备无关：返回 (是否显示显存, 显存MB)。NPU/CUDA 可显示，CPU 不显示。"""
+    if device is None:
+        if torch.cuda.is_available():
+            return True, torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+        return False, 0.0
+    if device.type == 'cuda':
+        return True, torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
+    if device.type == 'npu':
+        return True, torch.npu.max_memory_allocated(device) / (1024.0 * 1024.0)
+    return False, 0.0
+
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
@@ -32,10 +52,11 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
-    def synchronize(self):
+    def synchronize(self, device=None):
         if not is_dist_avail_and_initialized():
             return
-        t = torch.tensor([self.sum, self.count], dtype=torch.float64, device='cuda')
+        dev = _get_device_for_tensor(device)
+        t = torch.tensor([self.sum, self.count], dtype=torch.float64, device=dev)
         dist.barrier()
         dist.all_reduce(t)
         t = t.tolist()
@@ -87,13 +108,15 @@ class SmoothedValue(object):
         self.count += n
         self.total += value * n
 
-    def synchronize_between_processes(self):
+    def synchronize_between_processes(self, device=None):
         """
         Warning: does not synchronize the deque!
+        device: 与训练 device 一致，用于 all_reduce 的 tensor 所在设备。
         """
         if not is_dist_avail_and_initialized():
             return
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
+        dev = _get_device_for_tensor(device)
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device=dev)
         dist.barrier()
         dist.all_reduce(t)
         t = t.tolist()
@@ -132,9 +155,10 @@ class SmoothedValue(object):
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\t", device=None):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.device = device
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
@@ -161,9 +185,10 @@ class MetricLogger(object):
             )
         return self.delimiter.join(loss_str)
 
-    def synchronize_between_processes(self):
+    def synchronize_between_processes(self, device=None):
+        dev = device if device is not None else self.device
         for meter in self.meters.values():
-            meter.synchronize_between_processes()
+            meter.synchronize_between_processes(device=dev)
 
     def add_meter(self, name, meter):
         self.meters[name] = meter
@@ -185,7 +210,8 @@ class MetricLogger(object):
             'time: {time}',
             'data: {data}'
         ]
-        if torch.cuda.is_available():
+        show_mem, _ = get_device_memory_mb(getattr(self, 'device', None))
+        if show_mem:
             log_msg.append('max mem: {memory:.0f}')
         log_msg = self.delimiter.join(log_msg)
         MB = 1024.0 * 1024.0
@@ -198,12 +224,13 @@ class MetricLogger(object):
             if i % print_freq == 0 or i == num_batches_per_epoch - 1:
                 eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
+                show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
+                if show_mem:
                     print(log_msg.format(
                         i, num_batches_per_epoch, eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
+                        memory=memory_mb))
                 else:
                     print(log_msg.format(
                         i, num_batches_per_epoch, eta=eta_string,
@@ -233,10 +260,10 @@ class MetricLogger(object):
             'time: {time}',
             'data: {data}'
         ]
-        if torch.cuda.is_available():
+        show_mem, _ = get_device_memory_mb(getattr(self, 'device', None))
+        if show_mem:
             log_msg.append('max mem: {memory:.0f}')
         log_msg = self.delimiter.join(log_msg)
-        MB = 1024.0 * 1024.0
 
         random_list = np.concatenate([[idx] * c for idx, c in enumerate(num_batches_per_epoch_list)])
         np.random.seed(epoch)
@@ -252,12 +279,13 @@ class MetricLogger(object):
             if i % print_freq == 0 or i == num_batches_per_epoch - 1:
                 eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
+                show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
+                if show_mem:
                     print(log_msg.format(
                         i, num_batches_per_epoch, eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
+                        memory=memory_mb))
                 else:
                     print(log_msg.format(
                         i, num_batches_per_epoch, eta=eta_string,
@@ -287,10 +315,10 @@ class MetricLogger(object):
             'time: {time}',
             'data: {data}'
         ]
-        if torch.cuda.is_available():
+        show_mem, _ = get_device_memory_mb(getattr(self, 'device', None))
+        if show_mem:
             log_msg.append('max mem: {memory:.0f}')
         log_msg = self.delimiter.join(log_msg)
-        MB = 1024.0 * 1024.0
 
         random_list = np.concatenate([[idx] * c for idx, c in enumerate(num_batches_per_epoch_list)])
         np.random.seed(epoch)
@@ -306,12 +334,13 @@ class MetricLogger(object):
             if i % print_freq == 0 or i == num_batches_per_epoch - 1:
                 eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
+                show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
+                if show_mem:
                     print(log_msg.format(
                         i, num_batches_per_epoch, eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
+                        memory=memory_mb))
                 else:
                     print(log_msg.format(
                         i, num_batches_per_epoch, eta=eta_string,
