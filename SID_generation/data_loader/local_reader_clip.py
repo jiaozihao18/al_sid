@@ -10,6 +10,7 @@ from math import ceil
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -86,15 +87,18 @@ def get_data(cfg, epoch_id=0):
     data = {}
 
     if cfg.data.train_clip:
-        print('preparing train_clip data...')
+        if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
+            print('preparing train_clip data...')
         data["train"] = get_dataset(cfg.data.train_clip, cfg, is_train=True, epoch_id=epoch_id)
 
     if len(cfg.data.train_clip2) > 1:
-        print('preparing train_clip2 data...')
+        if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
+            print('preparing train_clip2 data...')
         data["train2"] = get_dataset(cfg.data.train_clip2, cfg, is_train=True, epoch_id=epoch_id)
 
     if len(cfg.data.train_clip3) > 1:
-        print('preparing train_clip3 data...')
+        if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
+            print('preparing train_clip3 data...')
         data["train3"] = get_dataset(cfg.data.train_clip3, cfg, is_train=True, epoch_id=epoch_id)
 
     return data
@@ -104,7 +108,8 @@ def get_i2idata_list(path_list, cfg, epoch_id=0):
     data = {}
 
     for path in path_list:
-        print(f'preparing {path} data...')
+        if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
+            print(f'preparing {path} data...')
         data_name = path.split('/')[-1].split('.')[0]
         data[data_name] = get_dataset(path, cfg, is_train=True, epoch_id=epoch_id)
 

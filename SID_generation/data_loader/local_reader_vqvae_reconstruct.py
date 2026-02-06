@@ -9,6 +9,7 @@ from math import ceil
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -85,7 +86,8 @@ def get_data(cfg, epoch_id=0):
     data = {}
 
     # 重建数据
-    print('preparing recon data...')
+    if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
+        print('preparing recon data...')
     if cfg.data.train_root:
         data["recon"] = get_dataset(cfg, is_train=True, epoch_id=epoch_id)
 
