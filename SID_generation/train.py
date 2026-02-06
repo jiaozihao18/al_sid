@@ -562,7 +562,14 @@ def evaluate(model, data, cfg, device):
     
     # 每个进程处理自己的数据
     with torch.no_grad():
-        for batch_idx, (item_ids, features) in enumerate(eval_dataloader):
+        # 只在主进程显示进度
+        if dist_utils.is_main_process():
+            from tqdm import tqdm
+            eval_iter = tqdm(eval_dataloader, desc='Evaluating', leave=False)
+        else:
+            eval_iter = eval_dataloader
+        
+        for batch_idx, (item_ids, features) in enumerate(eval_iter):
             features = features.to(device, non_blocking=True)
             
             # 获取code（使用当前的模型权重）
@@ -570,11 +577,14 @@ def evaluate(model, data, cfg, device):
             codes = model_unwrapped.rq_model.get_codes(features)
             # codes shape: [batch_size, h, w, codebook_num]
             codes_cpu = codes.cpu().numpy()
-            codes_list.extend(codes_cpu)
+            # 按batch维度拆分，每个元素shape: [h, w, codebook_num]
+            for i in range(codes_cpu.shape[0]):
+                codes_list.append(codes_cpu[i])
     
     # DDP模式下，收集所有进程的codes_list到rank 0
     if dist_utils.is_dist_avail_and_initialized():
-        codes_tensor = torch.from_numpy(np.array(codes_list)).to(device)
+        codes_array = np.array(codes_list)  # shape: [N, h, w, codebook_num]
+        codes_tensor = torch.from_numpy(codes_array).to(device)
         gathered_codes = [torch.zeros_like(codes_tensor) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_codes, codes_tensor)
         
