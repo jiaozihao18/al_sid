@@ -456,9 +456,10 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             # 计算准确率
             acc = output['clip_acc'].item()
 
-            temperature = model.module.logit_scale.item()
-            temperature_self = model.module.logit_scale_self.item()
-            temperature_cl = model.module.logit_scale_cl.item()
+            model_unwrapped = dist_utils.get_model(model)
+            temperature = model_unwrapped.logit_scale.item()
+            temperature_self = model_unwrapped.logit_scale_self.item()
+            temperature_cl = model_unwrapped.logit_scale_cl.item()
             loss_value = loss.item()
 
             commitment_loss = output['commitment_loss'].item()
