@@ -43,7 +43,7 @@ def parse_arguments():
 
     # 设备与分布式：在前面指定 device_type，后续代码设备无关
     parser.add_argument('--device_type', default='', type=str, choices=['cuda', 'npu', ''],
-                        help='Device: cuda or npu. Default from config (default.yml).')
+                        help='Device: cuda or npu. Default from config.')
     parser.add_argument('--world_size', default=1, type=int, help='Number of distributed processes')
     parser.add_argument('--rank', default=0, type=int, help='')
     parser.add_argument('--gpu', default=0, type=int, help='')
@@ -192,9 +192,11 @@ def main():
 
     if cfg.dist.distributed:
         print("Model distributed data parallelism")
+        # device_ids 使用本地设备 ID（LOCAL_RANK），对于 NPU 和 CUDA 都适用
+        # cfg.dist.gpu 在 init_distributed_mode 中已设置为 LOCAL_RANK
         model = torch.nn.parallel.DistributedDataParallel(
             module=model,
-            device_ids=[cfg.dist.gpu],
+            device_ids=[cfg.dist.gpu],  # LOCAL_RANK，节点内的设备 ID
             find_unused_parameters=True
         )
         # 保证 device 指向 DDP 所在设备
@@ -205,7 +207,8 @@ def main():
     # -----------------------------------------------------------------------------------------------
     # Initialize dataset and dataloader
     print("Creating dataset and data loader...")
-    assert len(cfg.data.tables) > 0 or cfg.data.FromOSS, 'No Data!'
+    # 检查实际使用的数据源：train_root（npz 文件）或 tables（ODPS 表，未实现）
+    assert cfg.data.train_root or len(cfg.data.tables) > 0, 'No Data! Please specify train_root or tables.'
     data = get_data(cfg=cfg, epoch_id=0)
     for key in data:
         print(f"The size of the training dataset {key}: {len(data[key].dataset)}")

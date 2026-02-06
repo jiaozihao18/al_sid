@@ -80,10 +80,6 @@ def get_config(args):
     if hasattr(args, 'LR') and args.LR > 0:
         cfg.train.lr = args.LR
 
-    if hasattr(args, 'mask_ratio') and args.mask_ratio >= 0:
-        cfg.data.img_aug.mask_ratio = args.mask_ratio
-
-
     if hasattr(args, 'output_table') and len(args.output_table) > 0:
         cfg.output_table = args.output_table
 
@@ -96,17 +92,14 @@ def get_config(args):
     if hasattr(args, 'input_dim') and len(args.input_dim) > 0:
         cfg.model.input_dim = args.input_dim
         
-    # table
-    if not cfg.data.FromOSS:
+    # table (ODPS 表功能未实现，保留此逻辑以兼容可能的未来扩展)
+    if hasattr(args, 'tables') and args.tables:
+        cfg.data.tables = args.tables
         if not cfg.eval:
-            cfg.data.tables = args.tables
             cfg.data.train_data = args.tables
             cfg.data.val_data = ''
         else:
             cfg.data.test_data = args.tables
-    else:
-        cfg.data.tables = args.tables
-        cfg.data.test_data = args.tables
 
     OmegaConf.set_struct(cfg, True)
     OmegaConf.set_readonly(cfg, True)

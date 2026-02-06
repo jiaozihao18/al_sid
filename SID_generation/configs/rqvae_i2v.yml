@@ -1,9 +1,7 @@
-_base_: 'default.yml'
-
 data:
   batch_size: 2048
   valid_batch_size: 2048
-  FromOSS: True
+  num_workers: 4
   train_root: 'datas/reconstruct_data_mask.npz'
   val_root: ''
   train_clip_i2i: [
@@ -41,18 +39,49 @@ model:
   rotation_trick: False
 
 train:
-  lr: 0.002
   finetune: ''
   start_epoch: 0
   epochs: 150
   warmup_epochs: 40
+  lr: 0.002
+  blr: 0.0002
   min_lr: 1e-7
+  weight_decay: 0.0001
+  clip_grad: null
+  accum_iter: 1
+  layer_decay: 0.0
+  norm_pix_loss: True
+  decoder_depth: 8
   neg_num: 0
   filter_lr: null
   filter_lr_name: ''
-  weight_decay: 0.0001 # 0.1 0.0001
 
+  lr_scheduler:
+    name: cosine
+
+  optimizer:
+    name: adamw
+    eps: 1e-8
+    betas: [0.9, 0.999]
+
+eval: false
+
+resume: ''
+
+dist:
+  # 设备类型: 'cuda' 或 'npu'，后续代码均基于 device 变量，与具体设备解耦
+  device_type: 'cuda'
+  distributed: False
+  local_rank: -1
+  world_size: 1
+  rank: 0
+  gpu: 0
+  dist_url: ''
+  dist_backend: ''
+
+seed: 0
+finetune: ''
 tmp_path: 'ckpts/'
-resume: '' # 
+output_dir: ''
 pretrain: ''
 log_step: 50

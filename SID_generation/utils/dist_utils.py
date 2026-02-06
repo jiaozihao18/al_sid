@@ -108,7 +108,9 @@ def init_distributed_mode(cfg, args):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         cfg.dist.rank = int(os.environ["RANK"])
         cfg.dist.world_size = int(os.environ['WORLD_SIZE'])
-        cfg.dist.gpu = max(args.local_rank, 0)
+        # 优先从环境变量读取 LOCAL_RANK（torchrun 自动设置），否则使用命令行参数
+        local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
+        cfg.dist.gpu = max(local_rank, 0)
     else:
         print('Not using distributed mode')
         setup_for_distributed(is_master=True)  # hack
@@ -134,7 +136,12 @@ def init_distributed_mode(cfg, args):
         print('| distributed init (rank {}): {}, gpu {}'.format(
             cfg.dist.rank, cfg.dist.dist_url, cfg.dist.gpu), flush=True)
 
-    torch.distributed.init_process_group(backend=cfg.dist.dist_backend)
+    # 使用 env:// 从环境变量读取 MASTER_ADDR、MASTER_PORT、RANK、WORLD_SIZE
+    # 对于 NPU，backend 为 'hccl'；对于 CUDA，backend 为 'nccl'
+    torch.distributed.init_process_group(
+        backend=cfg.dist.dist_backend,
+        init_method='env://'  # 从环境变量读取，torchrun 会自动设置
+    )
     cfg.dist.rank = dist.get_rank()
     cfg.dist.world_size = dist.get_world_size()
     OmegaConf.set_struct(cfg, True)
