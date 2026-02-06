@@ -50,7 +50,7 @@ class OSSFileImageNetDataset(torch.utils.data.Dataset):
 @dataclass
 class DataInfo:
     dataloader: DataLoader
-    sampler: DistributedSampler
+    sampler: DistributedSampler  # 可能是None（非分布式模式）
     dataset: OSSFileImageNetDataset
     epoch_id: int
 
@@ -65,7 +65,11 @@ def get_dataset(root, cfg, is_train, epoch_id=0):
     )
 
     batch_size = cfg.data.batch_size if is_train else cfg.data.valid_batch_size
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+    # 只在分布式模式下使用DistributedSampler
+    if dist.is_initialized():
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+    else:
+        sampler = None
 
     dataloader = DataLoader(
         dataset,
