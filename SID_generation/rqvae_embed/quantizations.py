@@ -30,7 +30,7 @@ def sinkhorn(cost, n_iters: int = 5, epsilon: float = 10., is_distributed: bool 
         cost (Tensor): shape with (B, K)
     """
     Q = torch.exp(- cost * epsilon).t()  # (K, B)
-    if is_distributed:
+    if is_distributed and dist.is_initialized():
         B = Q.size(1) * dist.get_world_size()
     else:
         B = Q.size(1)
@@ -38,14 +38,14 @@ def sinkhorn(cost, n_iters: int = 5, epsilon: float = 10., is_distributed: bool 
 
     # make the matrix sums to 1
     sum_Q = torch.sum(Q)
-    if is_distributed:
+    if is_distributed and dist.is_initialized():
         dist.all_reduce(sum_Q)
     Q /= (sum_Q + 1e-8)
 
     for _ in range(n_iters):
         # normalize each row: total weight per prototype must be 1/K
         sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
-        if is_distributed:
+        if is_distributed and dist.is_initialized():
             dist.all_reduce(sum_of_rows)
         Q /= (sum_of_rows + 1e-8)
         Q /= K
