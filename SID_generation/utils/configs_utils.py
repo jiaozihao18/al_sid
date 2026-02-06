@@ -56,17 +56,15 @@ def get_config(args):
     cfg = load_config(args.cfg)
 
     # cfg.tmp_path = f'tmp_{int(time.time())}'
-    if hasattr(args, 'eval') and args.eval:
-        cfg.eval = args.eval
 
     if hasattr(args, 'valid_batch_size') and args.valid_batch_size > 0:
-        cfg.data.valid_batch_size = args.valid_batch_size
+        if not hasattr(cfg, 'eval'):
+            from omegaconf import DictConfig
+            cfg.eval = DictConfig({})
+        cfg.eval.valid_batch_size = args.valid_batch_size
 
     if hasattr(args, 'output_dir') and len(args.output_dir) > 0:
         cfg.output_dir = args.output_dir
-
-    if hasattr(args, 'finetune') and len(args.finetune) > 0:
-        cfg.finetune = args.finetune
 
     if hasattr(args, 'resume') and len(args.resume) > 0:
         cfg.resume = args.resume
@@ -95,11 +93,8 @@ def get_config(args):
     # table (ODPS 表功能未实现，保留此逻辑以兼容可能的未来扩展)
     if hasattr(args, 'tables') and args.tables:
         cfg.data.tables = args.tables
-        if not cfg.eval:
-            cfg.data.train_data = args.tables
-            cfg.data.val_data = ''
-        else:
-            cfg.data.test_data = args.tables
+        cfg.data.train_data = args.tables
+        cfg.data.val_data = ''
 
     OmegaConf.set_struct(cfg, True)
     OmegaConf.set_readonly(cfg, True)

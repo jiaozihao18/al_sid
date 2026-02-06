@@ -33,7 +33,6 @@ def parse_arguments():
     """parse argument"""
     parser = argparse.ArgumentParser('RQVAE training', add_help=False)
     parser.add_argument('--cfg', default='configs/rqvae_i2v.yml', type=str)
-    parser.add_argument('--finetune', default='', help='Fine-tuning checkpoints')
     parser.add_argument('--output_dir', default='', help='Storage path')
     parser.add_argument("--tables", default='', help="ODPS table path")
     parser.add_argument('--resume', default='', help='Recovery checkpoint path')
@@ -258,7 +257,7 @@ def main():
     formatted_timestamp = datetime.datetime.fromtimestamp(current_timestamp_seconds).strftime('%Y%m%d_%H%M%S')
     cfg.output_dir += f"{cfg.data.save_prefix}_bs{cfg.data.batch_size}_lr{cfg.train.lr}_ep{cfg.train.epochs}_{formatted_timestamp}"
 
-    if dist_utils.get_rank() == 0 and not cfg.eval:
+    if dist_utils.get_rank() == 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
         config_dict = OmegaConf.to_container(cfg, resolve=True)
         with open(os.path.join(cfg.output_dir, 'config.json'), 'w') as file_handle:
@@ -367,11 +366,10 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
     
     # 用于统计商品冲突率和码本利用率
     # 统计频率从config读取，默认每10个epoch统计一次
-    stats_freq = getattr(cfg.train, 'stats_freq', 10)  # 每N个epoch统计一次
-    collision_sample_ratio = getattr(cfg.train, 'collision_sample_ratio', 0.1)
+    eval_cfg = getattr(cfg, 'eval', None)
+    stats_freq = getattr(eval_cfg, 'stats_freq', 10) if eval_cfg else 10  # 每N个epoch统计一次
+    collision_sample_ratio = getattr(eval_cfg, 'collision_sample_ratio', 0.1) if eval_cfg else 0.1
     collect_stats = (stats_freq > 0 and (epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1))
-    # 如果每个epoch中每个item只出现一次，可以直接收集code列表，不需要item_id
-    codes_list = [] if (collect_stats and collision_sample_ratio > 0) else None
 
     dataloader, sampler = data['recon'].dataloader, data['recon'].sampler
     data_iter = iter(dataloader)
@@ -413,20 +411,6 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             features = features.to(device, non_blocking=True)
             loss, recons, selected_index, loss_dict, feature_norm, quant_norm = model(features)
             
-            # 收集code用于冲突率统计
-            # 如果每个epoch中每个item只出现一次，可以直接收集code列表，不需要item_id
-            if codes_list is not None:
-                with torch.no_grad():
-                    # 获取每个样本的code
-                    if hasattr(model, 'module'):
-                        codes = model.module.rq_model.get_codes(features)
-                    else:
-                        codes = model.rq_model.get_codes(features)
-                    # codes shape: [batch_size, h, w, codebook_num]
-                    codes_cpu = codes.cpu().numpy()
-                    # 直接收集code列表（每个epoch中每个item只出现一次，不需要item_id去重）
-                    for code in codes_cpu:
-                        codes_list.append(code)
 
             loss_value = loss.item()
 
@@ -510,40 +494,115 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
     metric_logger.synchronize_between_processes(device=device)
     dist_utils.main_print("Averaged stats:", metric_logger)
     
-    # 计算码本利用率和商品冲突率（只在主进程计算，避免重复）
-    stats_freq = getattr(cfg.train, 'stats_freq', 10)  # 每N个epoch统计一次
-    if dist_utils.is_main_process() and (epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1):
-        model.eval()  # 设置为eval模式
+    # 评估：计算码本利用率和商品冲突率
+    # 使用evaluate函数，支持DDP模式，在epoch训练结束后用最终权重评估
+    eval_cfg = getattr(cfg, 'eval', None)
+    stats_freq = getattr(eval_cfg, 'stats_freq', 10) if eval_cfg else 10  # 每N个epoch评估一次
+    if epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1:
+        dist_utils.main_print("Evaluating codebook utilization and collision rate...")
+        eval_stats = evaluate(model, data, cfg, device)
         
-        # 码本利用率和商品非冲突率统计（使用相同的codes_list数据）
-        # 定义：一个商品用所有层码本表示为一个完整的code
-        if codes_list and len(codes_list) > 0:
-            sample_ratio = getattr(cfg.train, 'collision_sample_ratio', 0.1)  # 从config读取采样比例
+        # 打印评估结果（只在主进程打印）
+        if dist_utils.is_main_process() and eval_stats:
+            # 打印码本利用率
+            num_codebooks = len([k for k in eval_stats.keys() if 'utilization' in k])
+            for i in range(num_codebooks):
+                used = int(eval_stats.get(f'codebook_{i}_used_codes', 0))
+                total = int(eval_stats.get(f'codebook_{i}_total_codes', 0))
+                utilization = eval_stats.get(f'codebook_{i}_utilization', 0.0)
+                dist_utils.main_print(f"codebook_{i}_utilization: {used}/{total}={utilization:.4f} ({utilization*100:.2f}%)")
             
-            # 码本利用率：统计每一层码本的使用率（使用的unique code数量 / 总code数量）
-            # 获取每层码本的大小
-            quantizer = model.module.rq_model.quantizer if hasattr(model, 'module') else model.rq_model.quantizer
-            codebook_sizes = [codebook.n_embed for codebook in quantizer.codebooks]
-            utilization_stats = compute_codebook_utilization(codes_list, codebook_sizes)
-            if utilization_stats:
-                num_codebooks = len([k for k in utilization_stats.keys() if 'utilization' in k])
-                for i in range(num_codebooks):
-                    used = int(utilization_stats.get(f'codebook_{i}_used_codes', 0))
-                    total = int(utilization_stats.get(f'codebook_{i}_total_codes', 0))
-                    utilization = utilization_stats.get(f'codebook_{i}_utilization', 0.0)
-                    dist_utils.main_print(f"codebook_{i}_utilization: {used}/{total}={utilization:.4f} ({utilization*100:.2f}%)")
-            
-            # 商品非冲突率统计：非冲突率 = unique code数量 / 总商品数（100%表示无冲突）
-            non_collision_stats = compute_non_collision_rate(codes_list, sample_ratio=sample_ratio)
-            non_collision_rate = non_collision_stats.get('non_collision_rate', 0.0)
-            unique_codes = int(non_collision_stats.get('unique_codes', 0))
-            total_items = int(non_collision_stats.get('total_items', 0))
-            collided_items = int(non_collision_stats.get('collided_items', 0))
+            # 打印非冲突率
+            non_collision_rate = eval_stats.get('non_collision_rate', 0.0)
+            unique_codes = int(eval_stats.get('unique_codes', 0))
+            total_items = int(eval_stats.get('total_items', 0))
+            collided_items = int(eval_stats.get('collided_items', 0))
             dist_utils.main_print(f"non_collision_rate: {unique_codes}/{total_items}={non_collision_rate:.4f} ({non_collision_rate*100:.2f}%), collided_items={collided_items}")
-        
-        model.train()  # 恢复训练模式
     
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+def evaluate(model, data, cfg, device):
+    """
+    评估模型：计算码本利用率和商品非冲突率
+    支持DDP模式，每个进程处理部分数据，最后在rank 0汇总结果
+    
+    Args:
+        model: 模型实例
+        data: 数据字典，包含'recon'数据集
+        cfg: 配置对象
+        device: 设备
+    
+    Returns:
+        dict: 包含利用率和冲突率的统计字典（只在rank 0返回结果，其他进程返回空dict）
+    """
+    model.eval()
+    
+    # 获取评估batch size（使用valid_batch_size）
+    eval_cfg = getattr(cfg, 'eval', None)
+    eval_batch_size = getattr(eval_cfg, 'valid_batch_size', cfg.data.batch_size) if eval_cfg else cfg.data.batch_size
+    collision_sample_ratio = getattr(eval_cfg, 'collision_sample_ratio', 0.1) if eval_cfg else 0.1
+    
+    # 创建评估用的dataloader（使用valid_batch_size）
+    recon_dataset = data['recon'].dataset
+    recon_sampler = torch.utils.data.distributed.DistributedSampler(
+        recon_dataset, 
+        shuffle=False  # 评估时不需要shuffle
+    )
+    eval_dataloader = torch.utils.data.DataLoader(
+        recon_dataset,
+        batch_size=eval_batch_size,
+        sampler=recon_sampler,
+        pin_memory=True,
+        num_workers=1,  # 评估时减少workers
+        drop_last=False  # 评估时不drop last batch
+    )
+    
+    codes_list = []
+    
+    # 每个进程处理自己的数据
+    with torch.no_grad():
+        for batch_idx, (item_ids, features) in enumerate(eval_dataloader):
+            features = features.to(device, non_blocking=True)
+            
+            # 获取code（使用当前的模型权重）
+            model_unwrapped = dist_utils.get_model(model)
+            codes = model_unwrapped.rq_model.get_codes(features)
+            # codes shape: [batch_size, h, w, codebook_num]
+            codes_cpu = codes.cpu().numpy()
+            codes_list.extend(codes_cpu)
+    
+    # DDP模式下，收集所有进程的codes_list到rank 0
+    if dist_utils.is_dist_avail_and_initialized():
+        codes_tensor = torch.from_numpy(np.array(codes_list)).to(device)
+        gathered_codes = [torch.zeros_like(codes_tensor) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered_codes, codes_tensor)
+        
+        # 在rank 0汇总
+        if dist.get_rank() == 0:
+            all_codes = np.concatenate([codes.cpu().numpy() for codes in gathered_codes], axis=0)
+            codes_list = [all_codes[i] for i in range(len(all_codes))]
+        else:
+            codes_list = []
+    
+    # 计算统计结果（只在主进程计算）
+    stats = {}
+    if dist_utils.is_main_process():
+        # 获取每层码本的大小
+        model_unwrapped = dist_utils.get_model(model)
+        quantizer = model_unwrapped.rq_model.quantizer
+        codebook_sizes = [codebook.n_embed for codebook in quantizer.codebooks]
+        
+        # 码本利用率：使用所有数据
+        utilization_stats = compute_codebook_utilization(codes_list, codebook_sizes)
+        stats.update(utilization_stats)
+        
+        # 商品非冲突率：可采样
+        non_collision_stats = compute_non_collision_rate(codes_list, sample_ratio=collision_sample_ratio)
+        stats.update(non_collision_stats)
+    
+    model.train()  # 恢复训练模式
+    return stats
 
 
 if __name__ == '__main__':
