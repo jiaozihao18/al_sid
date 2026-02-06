@@ -246,7 +246,7 @@ def all_reduce_mean(x, device=None):
     if world_size > 1:
         if device is None:
             device = torch.device('cuda:0')  # 兼容旧调用
-        x_reduce = torch.tensor(x, dtype=torch.float64, device=device)
+        x_reduce = torch.tensor(x, dtype=torch.float32, device=device)
         dist.all_reduce(x_reduce)
         x_reduce /= world_size
         return x_reduce.item()
@@ -264,7 +264,7 @@ def all_reduce_mean_batch(args, device=None):
         device = torch.device('cuda:0')
     for x in args:
         if world_size > 1:
-            x_reduce = torch.tensor(x, dtype=torch.float64, device=device)
+            x_reduce = torch.tensor(x, dtype=torch.float32, device=device)
             dist.all_reduce(x_reduce)
             x_reduce /= world_size
             results.append(x_reduce.item())

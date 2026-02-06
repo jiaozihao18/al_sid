@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .dist_utils import is_dist_avail_and_initialized
+from .dist_utils import is_dist_avail_and_initialized, is_main_process
 
 
 def _get_device_for_tensor(device):
@@ -56,7 +56,7 @@ class AverageMeter(object):
         if not is_dist_avail_and_initialized():
             return
         dev = _get_device_for_tensor(device)
-        t = torch.tensor([self.sum, self.count], dtype=torch.float64, device=dev)
+        t = torch.tensor([self.sum, self.count], dtype=torch.float32, device=dev)
         dist.barrier()
         dist.all_reduce(t)
         t = t.tolist()
@@ -116,7 +116,7 @@ class SmoothedValue(object):
         if not is_dist_avail_and_initialized():
             return
         dev = _get_device_for_tensor(device)
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device=dev)
+        t = torch.tensor([self.count, self.total], dtype=torch.float32, device=dev)
         dist.barrier()
         dist.all_reduce(t)
         t = t.tolist()
@@ -240,7 +240,8 @@ class MetricLogger(object):
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / num_batches_per_epoch))
+        if is_main_process():  # 只在主进程打印
+            print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / num_batches_per_epoch))
 
     def log_every_list(self, iterable_list, num_batches_per_epoch_list, print_freq, epoch, header=None):
         i = 0
@@ -268,7 +269,8 @@ class MetricLogger(object):
         random_list = np.concatenate([[idx] * c for idx, c in enumerate(num_batches_per_epoch_list)])
         np.random.seed(epoch)
         np.random.shuffle(random_list)
-        print(random_list[:50])
+        if is_main_process():  # 只在主进程打印
+            print(random_list[:50])
 
         for i in range(num_batches_per_epoch):
             iterable = iterable_list[random_list[i]]
@@ -277,25 +279,27 @@ class MetricLogger(object):
             yield (data, random_list[i])
             iter_time.update(time.time() - end)
             if i % print_freq == 0 or i == num_batches_per_epoch - 1:
-                eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
-                if show_mem:
-                    print(log_msg.format(
-                        i, num_batches_per_epoch, eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
-                        memory=memory_mb))
-                else:
-                    print(log_msg.format(
-                        i, num_batches_per_epoch, eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
+                if is_main_process():  # 只在主进程打印，避免多卡重复输出
+                    eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
+                    eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                    show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
+                    if show_mem:
+                        print(log_msg.format(
+                            i, num_batches_per_epoch, eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time),
+                            memory=memory_mb))
+                    else:
+                        print(log_msg.format(
+                            i, num_batches_per_epoch, eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time)))
             i += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / num_batches_per_epoch))
+        if is_main_process():  # 只在主进程打印
+            print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / num_batches_per_epoch))
 
     def log_every_list_with_datasetname(self, iterable_list, num_batches_per_epoch_list, dataset_names, print_freq, epoch, header=None):
         i = 0
@@ -323,7 +327,8 @@ class MetricLogger(object):
         random_list = np.concatenate([[idx] * c for idx, c in enumerate(num_batches_per_epoch_list)])
         np.random.seed(epoch)
         np.random.shuffle(random_list)
-        print(random_list[:50])
+        if is_main_process():  # 只在主进程打印
+            print(random_list[:50])
 
         for i in range(num_batches_per_epoch):
             iterable = iterable_list[random_list[i]]
@@ -332,22 +337,24 @@ class MetricLogger(object):
             yield (data, random_list[i], dataset_names[random_list[i]])
             iter_time.update(time.time() - end)
             if i % print_freq == 0 or i == num_batches_per_epoch - 1:
-                eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
-                if show_mem:
-                    print(log_msg.format(
-                        i, num_batches_per_epoch, eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
-                        memory=memory_mb))
-                else:
-                    print(log_msg.format(
-                        i, num_batches_per_epoch, eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
+                if is_main_process():  # 只在主进程打印，避免多卡重复输出
+                    eta_seconds = iter_time.global_avg * (num_batches_per_epoch - i)
+                    eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                    show_mem, memory_mb = get_device_memory_mb(getattr(self, 'device', None))
+                    if show_mem:
+                        print(log_msg.format(
+                            i, num_batches_per_epoch, eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time),
+                            memory=memory_mb))
+                    else:
+                        print(log_msg.format(
+                            i, num_batches_per_epoch, eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time)))
             i += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / num_batches_per_epoch))
+        if is_main_process():  # 只在主进程打印
+            print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / num_batches_per_epoch))
