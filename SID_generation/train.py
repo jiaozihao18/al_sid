@@ -14,7 +14,6 @@ import os
 import random
 import sys
 import time
-from pprint import pprint
 
 import numpy as np
 import torch
@@ -28,18 +27,6 @@ from utils import dist_utils
 from utils import logger
 from utils.configs_utils import get_config
 from utils.optim_factory import get_param_groups
-
-
-def main_print(*args, **kwargs):
-    """只在主进程打印，避免多卡重复输出"""
-    if dist_utils.is_main_process():
-        print(*args, **kwargs)
-
-
-def main_pprint(*args, **kwargs):
-    """只在主进程使用pprint打印，避免多卡重复输出"""
-    if dist_utils.is_main_process():
-        pprint(*args, **kwargs)
 
 
 def parse_arguments():
@@ -81,7 +68,7 @@ def gather_tensors(tensor):
 def initialize_training_environment(args, config):
     """init environment"""
     dist_utils.init_distributed_mode(config, args)
-    main_pprint(OmegaConf.to_object(config))
+    dist_utils.main_pprint(OmegaConf.to_object(config))
 
 
 def create_model(config):
@@ -138,10 +125,10 @@ def prepare_optimizer_and_scheduler(config, model_without_ddp):
     if config.train.lr is None:
         config.train.lr = config.train.blr * effective_batch_size / 256
 
-    main_print(f"base lr: {round(config.train.lr * 256 / effective_batch_size, 6)}")
-    main_print(f"lr: {round(config.train.lr, 6)}")
-    main_print(f"Gradient accumulation: {config.train.accum_iter}")
-    main_print(f"Effective batch size: {effective_batch_size}")
+    dist_utils.main_print(f"base lr: {round(config.train.lr * 256 / effective_batch_size, 6)}")
+    dist_utils.main_print(f"lr: {round(config.train.lr, 6)}")
+    dist_utils.main_print(f"Gradient accumulation: {config.train.accum_iter}")
+    dist_utils.main_print(f"Effective batch size: {effective_batch_size}")
 
     param_groups = get_param_groups(config, model_without_ddp)
 
@@ -183,7 +170,7 @@ def main():
 
     # -----------------------------------------------------------------------------------------------
     # Build model
-    main_print("building model...")
+    dist_utils.main_print("building model...")
     model = create_model(cfg)
 
     # -----------------------------------------------------------------------------------------------
@@ -198,11 +185,11 @@ def main():
 
     model_without_ddp = model
     number_of_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    main_print(f"Model: {str(model_without_ddp)}")
-    main_print(f"Parametes of Model(M): {number_of_trainable_params / 1e6:.2f}")
+    dist_utils.main_print(f"Model: {str(model_without_ddp)}")
+    dist_utils.main_print(f"Parametes of Model(M): {number_of_trainable_params / 1e6:.2f}")
 
     if cfg.dist.distributed:
-        main_print("Model distributed data parallelism")
+        dist_utils.main_print("Model distributed data parallelism")
         # device_ids 使用本地设备 ID（LOCAL_RANK），对于 NPU 和 CUDA 都适用
         # cfg.dist.gpu 在 init_distributed_mode 中已设置为 LOCAL_RANK
         model = torch.nn.parallel.DistributedDataParallel(
@@ -217,38 +204,41 @@ def main():
 
     # -----------------------------------------------------------------------------------------------
     # Initialize dataset and dataloader
-    main_print("Creating dataset and data loader...")
+    dist_utils.main_print("Creating dataset and data loader...")
     # 检查实际使用的数据源：train_root（npz 文件）或 tables（ODPS 表，未实现）
     assert cfg.data.train_root or len(cfg.data.tables) > 0, 'No Data! Please specify train_root or tables.'
     data = get_data(cfg=cfg, epoch_id=0)
     for key in data:
-        main_print(f"The size of the training dataset {key}: {len(data[key].dataset)}")
+        dist_utils.main_print(f"The size of the training dataset {key}: {len(data[key].dataset)}")
 
     # -----------------------------------------------------------------------------------------------
     # Initialize optimizer and lr scheduler
-    main_print("Creating optimizer and learning rate scheduler...")
+    dist_utils.main_print("Creating optimizer and learning rate scheduler...")
     optimizer = prepare_optimizer_and_scheduler(config=cfg, model_without_ddp=model_without_ddp)
-    main_print(optimizer)
+    dist_utils.main_print(optimizer)
     OmegaConf.set_readonly(cfg, True)
 
     # -----------------------------------------------------------------------------------------------
     # training
-    main_print(f"start training {cfg.train.epochs} epoch...")
-    main_print(f"output dir: {cfg.output_dir}")
+    dist_utils.main_print(f"start training {cfg.train.epochs} epoch...")
+    dist_utils.main_print(f"output dir: {cfg.output_dir}")
     start_time = time.time()
 
     for epoch in range(cfg.train.start_epoch, cfg.train.epochs):
         train_stats = train_one_epoch(model, data, optimizer, epoch, cfg=cfg, device=device)
         if cfg.output_dir and (epoch % 1 == 0 or epoch + 1 == cfg.train.epochs):
-            checkpoint_save_info = {
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-                'cfg': OmegaConf.to_container(cfg),
-            }
-            torch.save(checkpoint_save_info, os.path.join(cfg.output_dir, f'checkpoint-{epoch}.pth'))
+            # 只在主进程保存checkpoint，避免多进程同时写入导致的问题
+            if dist_utils.is_main_process():
+                os.makedirs(cfg.output_dir, exist_ok=True)  # 确保目录存在
+                checkpoint_save_info = {
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'cfg': OmegaConf.to_container(cfg),
+                }
+                torch.save(checkpoint_save_info, os.path.join(cfg.output_dir, f'checkpoint-{epoch}.pth'))
 
-        main_print('*' * 100)
+        dist_utils.main_print('*' * 100)
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch,
                      'n_parameters': number_of_trainable_params}
@@ -260,7 +250,7 @@ def main():
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    main_print(f"Training Time: {total_time_str}")
+    dist_utils.main_print(f"Training Time: {total_time_str}")
 
 
 def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.Optimizer,
@@ -303,8 +293,8 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
     optimizer.zero_grad()
 
     # 开始训练循环
-    main_print('=======>')
-    main_print(f'Start {epoch}')
+    dist_utils.main_print('=======>')
+    dist_utils.main_print(f'Start {epoch}')
 
     for data_iter_step, (batch, select_idx, dataset_name) in enumerate(
             metric_logger.log_every_list_with_datasetname(data_iter_list, num_batches_per_epoch_list, dataset_names,
@@ -399,7 +389,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             metric_logger.update(**log_metrics)
 
     metric_logger.synchronize_between_processes(device=device)
-    main_print("Averaged stats:", metric_logger)
+    dist_utils.main_print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 

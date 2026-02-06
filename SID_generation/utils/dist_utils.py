@@ -8,6 +8,7 @@
 """
 import os
 import shutil
+from pprint import pprint
 
 import torch
 import torch.autograd as autograd
@@ -98,6 +99,18 @@ def get_rank():
 
 def is_main_process():
     return get_rank() == 0
+
+
+def main_print(*args, **kwargs):
+    """只在主进程打印，避免多卡重复输出"""
+    if is_main_process():
+        print(*args, **kwargs)
+
+
+def main_pprint(*args, **kwargs):
+    """只在主进程使用pprint打印，避免多卡重复输出"""
+    if is_main_process():
+        pprint(*args, **kwargs)
 
 
 def init_distributed_mode(cfg, args):

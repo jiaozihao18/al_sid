@@ -20,6 +20,18 @@ from torch import optim as optim
 import math
 import json
 
+# 延迟导入避免循环依赖
+def main_print(*args, **kwargs):
+    """只在主进程打印，避免多卡重复输出"""
+    try:
+        from . import dist_utils
+        dist_utils.main_print(*args, **kwargs)
+    except (ImportError, AttributeError):
+        # 如果无法导入dist_utils，使用简单的检查
+        import torch.distributed as dist
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(*args, **kwargs)
+
 try:
     from apex.optimizers import FusedNovoGrad, FusedAdam, FusedLAMB, FusedSGD
 
@@ -65,7 +77,7 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_layer_scale
             flag = False
             for filter_n in kwargs.get('filter_name', []):
                 if filter_n in name:
-                    print(f"filter {name} because of the pattern {filter_n}")
+                    main_print(f"filter {name} because of the pattern {filter_n}")
                     flag = True
             if flag:
                 continue
@@ -101,7 +113,7 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_layer_scale
 
         parameter_group_vars[group_name]["params"].append(param)
         parameter_group_names[group_name]["params"].append(name)
-    print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
+    main_print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
     return list(parameter_group_vars.values())
 
 
@@ -131,7 +143,7 @@ def create_optimizer(cfg, model, get_num_layer=None, get_layer_scale=None, filte
             skip = skip_list
         elif hasattr(model, 'no_weight_decay'):
             skip = model.no_weight_decay()
-        print(f"Skip weight decay name marked in model: {skip}")
+        main_print(f"Skip weight decay name marked in model: {skip}")
         parameters = get_parameter_groups(model, weight_decay, skip, get_num_layer, get_layer_scale, **kwargs)
         weight_decay = 0.
     else:
@@ -144,7 +156,7 @@ def create_optimizer(cfg, model, get_num_layer=None, get_layer_scale=None, filte
     opt_args['eps'] = cfg.train.opt_eps
     opt_args['betas'] = cfg.train.opt_betas
 
-    print('Optimizer config:', opt_args)
+    main_print('Optimizer config:', opt_args)
     opt_split = opt_lower.split('_')
     opt_lower = opt_split[-1]
     if opt_lower == 'sgd' or opt_lower == 'nesterov':
