@@ -155,11 +155,51 @@ Data Availability: All training datasets have been released on Hugging Face.
 | **Training/Test Dataset** | [AL-GR / AL-GR-v1](https://huggingface.co/datasets/AL-GR/AL-GR-v1/) | [AL-GR / AL-GR](https://huggingface.co/datasets/AL-GR/AL-GR/) |
 | **Item-SID Mapping** | [AL-GR/Item-SID/sid_final.csv](https://huggingface.co/datasets/AL-GR/Item-SID/blob/main/sid_final.csv) | [AL-GR/Item-SID/sid_base.csv](https://huggingface.co/datasets/AL-GR/Item-SID/blob/main/sid_base.csv) |
 | **Tiny Dataset** | Both training and testing use the final version: [AL-GR / AL-GR-Tiny](https://huggingface.co/datasets/AL-GR/AL-GR-Tiny) | Base version without preprocessing; if needed, can be obtained by joining [AL-GR/AL-GR-Tiny/origin_behavior](https://huggingface.co/datasets/AL-GR/AL-GR-Tiny/tree/main/origin_behavior) from the Tiny data with [the base version Item-SID](https://huggingface.co/datasets/AL-GR/AL-GR-Tiny/blob/main/item_info/tiny_item_sid_base.csv) mapping. |
-| **ITEM-EMB Multimodal Data** | final version: [AL-GR / Item-EMB](https://huggingface.co/datasets/AL-GR/Item-EMB) | No base version available |
+| **ITEM-EMB Multimodal Data** | final version: [AL-GR / Item-EMB / final_feature](https://huggingface.co/datasets/AL-GR/Item-EMB/tree/main/final_feature) | base version: [AL-GR / Item-EMB / base_feature](https://huggingface.co/datasets/AL-GR/Item-EMB/tree/main/base_feature) |
 ---
 
+Use this code for preview the ITEM-EMB Multimodal Data:
+```python
+import base64
+import numpy as np
+from datasets import load_dataset
+import pandas as pd
+import logging
 
+data_file = "./data/part_0.csv"
+chunk_size = 50  #
+INPUT_EMBEDDING_COL = 'feature'  # the name of embedding col: "feature"
+INPUT_ID_COL = 'base62_string'  # the name of item_id after hash: "base62_string"
+item_ids_buffer = []
+embeddings_buffer = []
+EXPECTED_EMBEDDING_DIM = 512
+for chunk in pd.read_csv(data_file, chunksize=chunk_size, encoding='utf-8'):
+    chunk = chunk[chunk[INPUT_EMBEDDING_COL] != INPUT_EMBEDDING_COL]
+    if chunk.empty:
+        continue
+    item_ids_buffer.extend(chunk[INPUT_ID_COL].tolist())
+    embeddings_buffer.extend(chunk[INPUT_EMBEDDING_COL].tolist())
+    break
 
+# print(item_ids_buffer, embeddings_buffer[:5])
+embedding_list = []
+valid_item_ids = []
+for idx, (item_id, embedding_str) in enumerate(zip(item_ids_buffer, embeddings_buffer)):
+    try:
+        embedding_np = np.frombuffer(base64.b64decode(embedding_str), dtype=np.float32)
+        if embedding_np.shape[0] != EXPECTED_EMBEDDING_DIM:
+            logging.warning(
+                f"The dim of item ID '{item_id}' is not correct"
+                f"Expected dim: {EXPECTED_EMBEDDING_DIM}, Actual dim: {embedding_np.shape[0]}。"
+            )
+            continue
+        embedding_list.append(embedding_np)
+        valid_item_ids.append(item_id)
+        print(f"idx:{idx}, item_id:{item_id}, embedding:{embedding_np[:5]}")
+    except Exception as e:
+        logging.warning(f"Error occurs when decoding item id '{item_id}'")
+        continue
+```
 
 ### SID Generation
 1. Training the Model
