@@ -49,7 +49,7 @@ def parse_arguments():
                         help="Local ranking in distributed training. Automatically imported by PAI or XDL launcher")
     parser.add_argument('--dist_url', default='env://', help='Set the URL for distributed training')
     parser.add_argument('--distributed', action='store_true', help='Whether to enable distributed training')
-    parser.add_argument('--save_prefix', default='test', help="Save Prefix")
+    parser.add_argument('--save_prefix', default='', help="Save Prefix, default use config's data.save_prefix")
 
     return parser.parse_args()
 
@@ -295,7 +295,7 @@ def main():
     start_time = time.time()
 
     for epoch in range(cfg.train.start_epoch, cfg.train.epochs):
-        train_stats = train_one_epoch(model, data, optimizer, epoch, cfg=cfg, device=device)
+        train_stats, eval_stats = train_one_epoch(model, data, optimizer, epoch, cfg=cfg, device=device)
         if cfg.output_dir and (epoch % 1 == 0 or epoch + 1 == cfg.train.epochs):
             # 只在主进程保存checkpoint，避免多进程同时写入导致的问题
             if dist_utils.is_main_process():
@@ -312,6 +312,15 @@ def main():
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch,
                      'n_parameters': number_of_trainable_params}
+        # 将 eval 的码本利用率、非冲突率等写入 log.txt（仅在该 epoch 有评估时包含）
+        if eval_stats is not None:
+            def _to_py(x):
+                if isinstance(x, (np.floating, np.float32, np.float64)):
+                    return float(x)
+                if isinstance(x, (np.integer, np.int32, np.int64)):
+                    return int(x)
+                return x
+            log_stats.update({f'eval_{k}': _to_py(v) for k, v in eval_stats.items()})
 
         if cfg.output_dir and dist_utils.is_main_process():
             os.makedirs(cfg.output_dir, exist_ok=True)
@@ -478,6 +487,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
     # 使用evaluate函数，支持DDP模式，在epoch训练结束后用最终权重评估
     eval_cfg = getattr(cfg, 'eval', None)
     stats_freq = getattr(eval_cfg, 'stats_freq', 10) if eval_cfg else 10  # 每N个epoch评估一次
+    eval_stats = None
     if epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1:
         dist_utils.main_print("Evaluating codebook utilization and collision rate...")
         eval_stats = evaluate(model, data, cfg, device)
@@ -499,7 +509,8 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             collided_items = int(eval_stats.get('collided_items', 0))
             dist_utils.main_print(f"non_collision_rate: {unique_codes}/{total_items}={non_collision_rate:.4f} ({non_collision_rate*100:.2f}%), collided_items={collided_items}")
     
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    return train_stats, eval_stats
 
 
 def evaluate(model, data, cfg, device):
