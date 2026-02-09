@@ -120,88 +120,63 @@ def _to_numpy_array(x):
         return np.array(x)
 
 
-def compute_codebook_utilization(codes_list, codebook_sizes):
+def compute_codebook_utilization(all_codes: np.ndarray, codebook_sizes: list):
     """
-    计算每层码本的利用率（使用的code数量 / 总code数量）
-    从实际训练数据中统计每一层码本的使用情况
-    
-    Args:
-        codes_list: list, code数组的列表，每个code shape: [h, w, codebook_num]
-        codebook_sizes: list, 每层码本的大小列表，如 [8192, 8192, 8192]
-    
-    Returns:
-        dict: 包含每层利用率的字典
+    all_codes: [N, num_layers]
     """
-    if not codes_list:
-        return {}
-    
-    num_layers = len(codebook_sizes)
-    utilization_stats = {}
-    
-    # 统一转换为numpy数组，避免重复转换
-    codes_np = [_to_numpy_array(code) for code in codes_list]
-    
-    # 对每一层计算利用率
-    for layer_idx in range(num_layers):
-        used_codes_set = set()
-        
-        for code in codes_np:
-            # 提取第layer_idx层的code: [h, w, codebook_num] -> [h, w]
-            code_layer = code[:, :, layer_idx]
-            # 统计unique codes
-            used_codes_set.update(code_layer.flatten().tolist())
-        
-        total_codes = codebook_sizes[layer_idx]
-        used_codes = len(used_codes_set)
-        utilization = used_codes / total_codes if total_codes > 0 else 0.0
-        
-        utilization_stats[f'codebook_{layer_idx}_utilization'] = utilization
-        utilization_stats[f'codebook_{layer_idx}_used_codes'] = used_codes
-        utilization_stats[f'codebook_{layer_idx}_total_codes'] = total_codes
-    
-    return utilization_stats
+    assert all_codes.ndim == 2
+    assert all_codes.shape[1] == len(codebook_sizes)
+
+    stats = {}
+    num_layers = all_codes.shape[1]
+
+    for l in range(num_layers):
+        layer_codes = all_codes[:, l]
+
+        # 过滤非法 code（防 padding / mask）
+        valid_codes = layer_codes[
+            (layer_codes >= 0) & (layer_codes < codebook_sizes[l])
+        ]
+
+        used_codes = np.unique(valid_codes)
+        used_cnt = len(used_codes)
+        total_cnt = codebook_sizes[l]
+
+        stats[f'codebook_{l}_utilization'] = used_cnt / total_cnt
+        stats[f'codebook_{l}_used_codes'] = used_cnt
+        stats[f'codebook_{l}_total_codes'] = total_cnt
+
+    return stats
 
 
-def compute_non_collision_rate(codes_list, sample_ratio=1.0):
+def compute_non_collision_rate(all_codes: np.ndarray, sample_ratio=1.0):
     """
-    计算商品非冲突率（unique code数量 / 总商品数）
-    
-    定义：一个商品用所有层码本表示为一个完整的code，非冲突率 = unique code数量 / 总商品数
-    - 如果所有商品都有不同的code，非冲突率 = 1.0（100%，无冲突）
-    - 如果有商品共享相同的code，非冲突率 < 1.0（有冲突）
-    
-    Args:
-        codes_list: list, code数组的列表，每个code shape: [h, w, codebook_num]，包含所有层的码本
-        sample_ratio: float, 采样比例，用于减少计算负担（默认1.0表示全部统计）
-    
-    Returns:
-        dict: 包含非冲突率的字典
+    all_codes: [N, num_layers]
+    定义：一个商品的完整 code = 各层 code 组成的 tuple
+    非冲突率 = unique(code_tuple) / N
     """
-    if not codes_list:
-        return {}
-    
-    # 采样以减少计算负担
+    assert all_codes.ndim == 2
+
+    N = all_codes.shape[0]
+
     if sample_ratio < 1.0:
-        import random
-        sample_size = max(1, int(len(codes_list) * sample_ratio))
-        codes_list = random.sample(codes_list, sample_size)
-    
-    # 统一转换为numpy数组并转换为tuple（可哈希）
-    code_to_count = {}
-    for code in codes_list:
-        code_np = _to_numpy_array(code)
-        code_tuple = tuple(code_np.flatten().tolist())
-        code_to_count[code_tuple] = code_to_count.get(code_tuple, 0) + 1
-    
-    num_items = len(codes_list)
-    unique_code_count = len(code_to_count)
-    non_collision_rate = unique_code_count / num_items if num_items > 0 else 0.0
-    collided_items = sum(count - 1 for count in code_to_count.values() if count > 1)
-    
+        sample_size = max(1, int(N * sample_ratio))
+        idx = np.random.choice(N, size=sample_size, replace=False)
+        codes = all_codes[idx]
+    else:
+        codes = all_codes
+
+    # 用 numpy 直接算 unique 行（比 Python set 快非常多）
+    unique_rows = np.unique(codes, axis=0)
+    unique_cnt = unique_rows.shape[0]
+
+    non_collision_rate = unique_cnt / codes.shape[0]
+    collided_items = codes.shape[0] - unique_cnt
+
     return {
         'non_collision_rate': non_collision_rate,
-        'unique_codes': unique_code_count,
-        'total_items': num_items,
+        'unique_codes': unique_cnt,
+        'total_items': codes.shape[0],
         'collided_items': collided_items,
     }
 
@@ -402,6 +377,10 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             metric_logger.log_every_list_with_datasetname(data_iter_list, num_batches_per_epoch_list, dataset_names,
                                                           print_freq, epoch,
                                                           header)):
+        # if data_iter_step >= 100:
+        #     dist_utils.main_print(f'Debug mode: reached max iter')
+        #     break    
+
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / num_batches_per_epoch + epoch, cfg)
 
@@ -527,15 +506,6 @@ def evaluate(model, data, cfg, device):
     """
     评估模型：计算码本利用率和商品非冲突率
     支持DDP模式，每个进程处理部分数据，最后在rank 0汇总结果
-    
-    Args:
-        model: 模型实例
-        data: 数据字典，包含'recon'数据集
-        cfg: 配置对象
-        device: 设备
-    
-    Returns:
-        dict: 包含利用率和冲突率的统计字典（只在rank 0返回结果，其他进程返回空dict）
     """
     model.eval()
     
@@ -546,28 +516,28 @@ def evaluate(model, data, cfg, device):
     
     # 创建评估用的dataloader（使用valid_batch_size）
     recon_dataset = data['recon'].dataset
-    # 只在分布式模式下使用DistributedSampler
     if dist.is_initialized():
         recon_sampler = torch.utils.data.distributed.DistributedSampler(
             recon_dataset, 
-            shuffle=False  # 评估时不需要shuffle
+            shuffle=False
         )
     else:
         recon_sampler = None
+
     eval_dataloader = torch.utils.data.DataLoader(
         recon_dataset,
         batch_size=eval_batch_size,
         sampler=recon_sampler,
         pin_memory=True,
-        num_workers=1,  # 评估时减少workers
-        drop_last=False  # 评估时不drop last batch
+        num_workers=1,
+        drop_last=False
     )
     
-    codes_list = []
-    
-    # 每个进程处理自己的数据
+    model_unwrapped = dist_utils.get_model(model)
+    local_codes = []
+
+    # ===== 1. 每个进程本地算 codes =====
     with torch.no_grad():
-        # 只在主进程显示进度
         if dist_utils.is_main_process():
             from tqdm import tqdm
             eval_iter = tqdm(eval_dataloader, desc='Evaluating', leave=False)
@@ -576,52 +546,58 @@ def evaluate(model, data, cfg, device):
         
         for batch_idx, (item_ids, features) in enumerate(eval_iter):
             features = features.to(device, non_blocking=True)
-            
-            # 获取code（使用当前的模型权重）
-            model_unwrapped = dist_utils.get_model(model)
-            codes = model_unwrapped.rq_model.get_codes(features)
-            # codes shape: [batch_size, h, w, codebook_num]
-            codes_cpu = codes.cpu().numpy()
-            # 按batch维度拆分，每个元素shape: [h, w, codebook_num]
-            for i in range(codes_cpu.shape[0]):
-                codes_list.append(codes_cpu[i])
-    
-    # DDP模式下，收集所有进程的codes_list到rank 0
+            codes = model_unwrapped.rq_model.get_codes(features)  # [B, num_layers]
+
+            local_codes.append(codes.detach().cpu())
+
+    local_codes = torch.cat(local_codes, dim=0)  # [N_local, num_layers]
+
+    # ===== 2. DDP 下收集所有 rank 的 codes（支持变长） =====
     if dist_utils.is_dist_avail_and_initialized():
-        codes_array = np.array(codes_list)  # shape: [N, h, w, codebook_num]
-        codes_tensor = torch.from_numpy(codes_array).to(device)
-        gathered_codes = [torch.zeros_like(codes_tensor) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_codes, codes_tensor)
-        
-        # 在rank 0汇总
+        world_size = dist.get_world_size()
+
+        local_len = torch.tensor([local_codes.shape[0]], device=device)
+        all_lens = [torch.zeros_like(local_len) for _ in range(world_size)]
+        dist.all_gather(all_lens, local_len)
+        all_lens = [l.item() for l in all_lens]
+        max_len = max(all_lens)
+
+        num_layers = local_codes.shape[1]
+
+        pad_len = max_len - local_codes.shape[0]
+        if pad_len > 0:
+            pad = torch.zeros((pad_len, num_layers), dtype=local_codes.dtype)
+            local_codes = torch.cat([local_codes, pad], dim=0)
+
+        local_codes = local_codes.to(device)
+
+        gathered = [torch.zeros_like(local_codes) for _ in range(world_size)]
+        dist.all_gather(gathered, local_codes)
+
         if dist.get_rank() == 0:
-            all_codes_list = []
-            for codes in gathered_codes:
-                codes_np = codes.cpu().numpy()
-                if len(codes_np) > 0:
-                    for i in range(len(codes_np)):
-                        all_codes_list.append(codes_np[i])
-            codes_list = all_codes_list
+            all_codes = []
+            for g, l in zip(gathered, all_lens):
+                if l > 0:
+                    all_codes.append(g[:l].cpu())
+            all_codes = torch.cat(all_codes, dim=0).numpy()  # [N_total, num_layers]
         else:
-            codes_list = []
-    
-    # 计算统计结果（只在主进程计算）
+            all_codes = None
+    else:
+        all_codes = local_codes.numpy()
+
+    # ===== 3. 只在主进程统计 =====
     stats = {}
     if dist_utils.is_main_process():
-        # 获取每层码本的大小
-        model_unwrapped = dist_utils.get_model(model)
         quantizer = model_unwrapped.rq_model.quantizer
-        codebook_sizes = [codebook.n_embed for codebook in quantizer.codebooks]
-        
-        # 码本利用率：使用所有数据
-        utilization_stats = compute_codebook_utilization(codes_list, codebook_sizes)
+        codebook_sizes = [cb.n_embed for cb in quantizer.codebooks]
+
+        utilization_stats = compute_codebook_utilization(all_codes, codebook_sizes)
+        non_collision_stats = compute_non_collision_rate(all_codes, sample_ratio=collision_sample_ratio)
+
         stats.update(utilization_stats)
-        
-        # 商品非冲突率：可采样
-        non_collision_stats = compute_non_collision_rate(codes_list, sample_ratio=collision_sample_ratio)
         stats.update(non_collision_stats)
-    
-    model.train()  # 恢复训练模式
+
+    model.train()
     return stats
 
 
