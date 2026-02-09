@@ -36,6 +36,7 @@
 使用以下命令启动分布式训练：
    ```bash
    python -m torch.distributed.launch --nnodes=2 --nproc_per_node=1 --master_port=27646 train.py --output_dir=/path/to/output --save_prefix=MODEL_NAME --cfg=configs/rqvae_i2v.yml
+   torchrun --nnodes=1 --nproc_per_node=8 train.py --cfg=configs/rqvae_i2v.yml
    ```
 
 ## 参数说明
