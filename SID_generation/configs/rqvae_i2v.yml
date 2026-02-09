@@ -40,14 +40,14 @@ train:
 
 eval:
   valid_batch_size: 2048  # 评估时的batch size
-  stats_freq: 10  # 每N个epoch统计一次码本利用率和商品冲突率（0表示禁用，只在最后一个epoch统计）
+  stats_freq: 1  # 每N个epoch统计一次码本利用率和商品冲突率（0表示禁用，只在最后一个epoch统计）
   collision_sample_ratio: 0.1  # 商品冲突率统计的采样比例（0.0-1.0），0.1表示采样10%的数据
 
 resume: ''
 
 dist:
   # 设备类型: 'cuda' 或 'npu'，后续代码均基于 device 变量，与具体设备解耦
-  device_type: 'cuda'
+  device_type: 'npu'
   distributed: False
   local_rank: -1
   world_size: 1
