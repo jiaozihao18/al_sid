@@ -1,5 +1,6 @@
 {
   "model_type": "qwen2_5",
+  "device_type": "cuda",
   "load_checkpoint_from": "Qwen/Qwen2.5-0.5B-Instruct",
   "dataset_name":"AL-GR/AL-GR-Tiny",
   "data_file":"/home/admin/workspace/aop_lab/data/AL-GR-Tiny/train_data/s1_tiny.csv",

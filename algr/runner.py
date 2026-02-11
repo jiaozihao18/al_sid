@@ -10,10 +10,11 @@ import argparse
 import traceback
 from typing import Union
 import torch.distributed as dist
-from datetime import datetime, timedelta
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
+import torch.nn as nn
 from transformers import (
+    AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
     TrainingArguments,
@@ -31,6 +32,7 @@ from utils.util import convert_args_value_type
 from utils.log import logger
 from utils.trainer import GRSTrainer
 from utils.data_collator import DataCollatorWrapper
+from utils import dist_utils
 
 ## Define different Runner configurations based on parameters
 class Runner:
@@ -99,10 +101,13 @@ class Runner:
     def create_model(self):
         ## Create model according to self.config
         checkpoint_path = self.config.load_checkpoint_from
-        device_map = self.training_args.device
+        device_type = getattr(self.config, 'device_type', None) or 'cuda'
+        local_rank = int(os.environ.get('LOCAL_RANK', getattr(self, '_local_rank', 0)))
 
-        if device_map.type == "cpu":
-            device_map = torch.device("cpu")
+        if device_type.lower() == 'cpu':
+            device_map = "cpu"
+        else:
+            device_map = dist_utils.get_device_for_model_loading(device_type, local_rank)
         
         if self.config.model_type == 'qwen2_5':
             from models.qwen2_5.modeling_qwen import Qwen2ForCausalLM
@@ -248,6 +253,8 @@ def main():
                         help="Local ranking in distributed training. Automatically imported by PAI or XDL launcher")
     parser.add_argument('--dist_url', default='env://', help='Set the URL for distributed training')
     parser.add_argument('--distributed', action='store_true', help='Whether to enable distributed training')
+    parser.add_argument('--device_type', default='', type=str, choices=['cuda', 'npu', ''],
+                        help='Device: cuda or npu. Default from config or cuda.')
     args = parser.parse_args()
 
     config = EasyDict(args.config)
@@ -257,8 +264,12 @@ def main():
     if 'predict_output' in config:
         config.predict_output['path'] = config.training_args['output_dir']
 
-    #Initialize the distributed environment
-    dist.init_process_group(backend='nccl', timeout=timedelta(seconds=1800))
+    # device_type: 优先 CLI，其次 config，默认 cuda
+    device_type = (args.device_type or getattr(config, 'device_type', None) or 'cuda').lower()
+    config.device_type = device_type
+
+    # Initialize the distributed environment (npu 用 hccl，cuda 用 nccl)
+    dist_utils.init_distributed_mode(device_type, args)
 
     runner = Runner(config)
     success = True
