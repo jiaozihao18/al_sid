@@ -8,9 +8,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 from options import args
-from data.dataset import DataProcess, custom_collate
+from data.dataset import PreprocessedDataset, make_collate_fn
 from datetime import datetime
-from datasets import load_dataset
 from torch.optim.lr_scheduler import LinearLR
 from tqdm import tqdm
 from model import MODELS
@@ -45,19 +44,17 @@ def main_worker(rank, world_size):
     model = model.to(rank)
     model = DDP(model,find_unused_parameters=True)
 
-    dataset = load_dataset("csv", data_files=args.data_path, split='train')
-    data_process = DataProcess(max_length=args.maxlen, item_count=args.item_count, is_train=True, num_neg_samples=args.num_neg_samples)
-    dataset_with_tensors = dataset.map(data_process, batched=False)
+    dataset_with_tensors = PreprocessedDataset(pt_path=args.data_path, is_train=True)
 
-    sampler = DistributedSampler(dataset_with_tensors, num_replicas=world_size, rank=rank, shuffle=False) #先不处理样本分片
+    sampler = DistributedSampler(dataset_with_tensors, num_replicas=world_size, rank=rank, shuffle=False)
     dataloader = DataLoader(
         dataset_with_tensors,
         batch_size=args.batch_size,
-        num_workers=2,  # 注意不要太大，避免资源竞争
+        num_workers=2,
         pin_memory=True,
         prefetch_factor=2,
         sampler=sampler,
-        collate_fn=custom_collate
+        collate_fn=make_collate_fn(args.item_count, args.num_neg_samples, is_train=True)
     )
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98))

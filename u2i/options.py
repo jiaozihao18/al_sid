@@ -9,7 +9,8 @@ def str2bool(s):
     return s == 'true'
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_path', default='/home/admin/workspace/aop_lab/data/AL-GR-Tiny/u2i/s1_tiny.csv', type=str)
+parser.add_argument('--data_path', default='/home/admin/workspace/aop_lab/data/AL-GR-Tiny/u2i/s1_tiny_with_feat.pt', type=str,
+                    help='训练/预测数据路径（.pt 文件，由 process.py 生成）')
 parser.add_argument('--num_neg_samples', default=20, type=int)
 parser.add_argument('--item_count', default=24573855, type=int)
 parser.add_argument('--batch_size', default=512, type=int)
