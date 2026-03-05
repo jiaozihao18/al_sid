@@ -169,13 +169,23 @@ class Runner:
             return None, tokenized_test
 
     def create_data_collator(self):
+        # IAP+LDPO 训练模式使用自定义 collator，产出 4D item-aware attention mask
+        if getattr(self.custom_args, "training_mode", None) == "iap_ldpo":
+            from utils.ldpo_data_collator import LDPODataCollator
+            data_collator = LDPODataCollator(tokenizer=self.tokenizer, padding=True)
+            return data_collator
+
         data_collator = DataCollatorForSeq2Seq(tokenizer=self.tokenizer, model=self.model, padding=True)
         if not self.is_train:
-            data_collator = DataCollatorWrapper(data_collator=data_collator,
-                                                extra_feature_names=["id",
-                                                                     self.custom_args.instruction_column,
-                                                                     self.custom_args.input_column,
-                                                                     self.custom_args.output_column])
+            data_collator = DataCollatorWrapper(
+                data_collator=data_collator,
+                extra_feature_names=[
+                    "id",
+                    self.custom_args.instruction_column,
+                    self.custom_args.input_column,
+                    self.custom_args.output_column,
+                ],
+            )
         return data_collator
 
 

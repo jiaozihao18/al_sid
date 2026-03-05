@@ -8,6 +8,7 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from transformers import LogitsProcessorList, StoppingCriteriaList, GenerationConfig
 
 from transformers.activations import ACT2FN
@@ -1233,12 +1234,17 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs[0]
 
-        if self.training:
+        if self.training and labels is not None:
             logits_to_keep = labels.shape[1] - self.min_first_non_neg_index(labels) + 1
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        if self.training:
+        if self.training and labels is not None:
             labels = labels[:, slice_indices]
+            # 对基于 token 的额外字段同步 slicing，确保与 logits/labels 对齐
+            if "ldpo_item_index" in kwargs and isinstance(slice_indices, slice):
+                ldpo_item_index = kwargs["ldpo_item_index"]
+                if ldpo_item_index is not None:
+                    kwargs["ldpo_item_index"] = ldpo_item_index[:, slice_indices]
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         loss = None
 
@@ -1268,6 +1274,116 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         tmp = (labels >= 0).cumsum(dim=-1)
         first_non_neg = (tmp==1).float().argmax(dim=-1).min().item()
         return first_non_neg
+
+    def loss_function(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        vocab_size: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        统一实现:
+        - 纯 NTP 训练 (无 LDPO 字段)
+        - IAP + LDPO + NTP 联合训练 (带 ldpo_* 字段)
+        """
+        # logits: [B, L, V], labels: [B, L]
+        B, L, V = logits.shape
+
+        # 1. NTP loss：在 labels[:,1:] 上做标准 CE
+        logits_next = logits[:, :-1, :]  # [B, L-1, V]
+        target = labels[:, 1:]           # [B, L-1]
+
+        ce_loss = F.cross_entropy(
+            logits_next.reshape(-1, V),
+            target.reshape(-1),
+            ignore_index=LabelSmoother.ignore_index,
+            reduction="mean",
+        )
+
+        # 如果没有 LDPO 相关字段，则直接返回 NTP loss
+        if "ldpo_item_index" not in kwargs or "ldpo_item_groups" not in kwargs:
+            return ce_loss
+
+        ldpo_item_index: torch.Tensor = kwargs.get("ldpo_item_index")
+        ldpo_item_groups: torch.Tensor = kwargs.get("ldpo_item_groups")
+        ldpo_num_items: Optional[torch.Tensor] = kwargs.get("ldpo_num_items", None)
+
+        if ldpo_item_index is None or ldpo_item_groups is None:
+            return ce_loss
+
+        # 2. 计算 token 级 log-prob（与 target 对齐）
+        log_probs_next = torch.log_softmax(logits_next, dim=-1)  # [B, L-1, V]
+        valid = target.ne(LabelSmoother.ignore_index)            # [B, L-1]
+
+        token_logp = torch.zeros_like(target, dtype=log_probs_next.dtype)
+        gathered = log_probs_next.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        token_logp[valid] = gathered[valid]
+
+        # 3. IAP：按 item 聚合得到 π(k)
+        # 对齐到 token_logp 的坐标系 (shift 后)
+        item_index_next = ldpo_item_index[:, 1:]  # [B, L-1]，历史为 -1，item 为 0..Nmax-1
+
+        B2, Nmax = ldpo_item_groups.shape
+        if B2 != B:
+            raise ValueError(
+                f"ldpo_item_groups batch size mismatch: {B2} vs logits batch size {B}"
+            )
+
+        pi = torch.zeros((B, Nmax), dtype=token_logp.dtype, device=token_logp.device)
+
+        for k in range(Nmax):
+            mask_k = item_index_next.eq(k) & valid  # [B, L-1]
+            if not mask_k.any():
+                continue
+            # 对每个样本，聚合该 item 所有 codeword 的 log-prob
+            pi[:, k] = (token_logp * mask_k).sum(dim=-1)
+
+        # 4. LDPO listwise loss
+        groups = ldpo_item_groups  # [B, Nmax]，0 为 padding，其它 1..J
+
+        # 用 num_items 进一步屏蔽 padding 区 (可选)
+        if ldpo_num_items is not None:
+            # 对于 k >= num_items[b] 的位置，将 group 置 0
+            for b in range(B):
+                n = int(ldpo_num_items[b].item())
+                if n < Nmax:
+                    groups[b, n:] = 0
+
+        # 最高层级编号 J (可能是 3 或 4)
+        max_group = int(groups.max().item())
+        if max_group <= 1:
+            # 没有可用的高低层结构，无法形成偏序约束
+            return ce_loss
+
+        alpha = kwargs.get("ldpo_alpha", getattr(self.config, "ldpo_alpha", 0.0))
+        beta = kwargs.get("ldpo_beta", getattr(self.config, "ldpo_beta", 1.0))
+
+        if alpha == 0.0:
+            return ce_loss
+
+        s = beta * pi  # [B, Nmax]
+        exp_s = torch.exp(s.clamp(min=-50.0, max=50.0))
+
+        loss_ldpo = logits.new_zeros(())
+
+        for j in range(1, max_group):
+            higher = groups.eq(j + 1)              # [B, Nmax]
+            lower = groups.ge(1) & groups.le(j)    # [B, Nmax]
+
+            num_higher = higher.sum()
+            if num_higher == 0:
+                continue
+
+            denom_lower = (exp_s * lower).sum(dim=-1, keepdim=True)  # [B,1]
+
+            frac = exp_s / (exp_s + denom_lower + 1e-12)             # [B, Nmax]
+            # 仅对 higher 项求 loss
+            term = -(torch.log(frac + 1e-12) * higher)               # [B, Nmax]
+            loss_ldpo = loss_ldpo + term.sum() / (num_higher + 1e-12)
+
+        loss = ce_loss + alpha * loss_ldpo
+        return loss
 
 @add_start_docstrings(
     """
