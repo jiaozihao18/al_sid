@@ -21,7 +21,7 @@ import torch.distributed as dist
 from omegaconf import OmegaConf
 
 import utils.lr_sched as lr_sched
-from data_loader.local_reader_vqvae_reconstruct import get_data
+from data_loader.data_loader import get_data
 from rqvae_embed.rqvae_clip import RQVAE_EMBED_CLIP
 from utils import dist_utils
 from utils import logger
