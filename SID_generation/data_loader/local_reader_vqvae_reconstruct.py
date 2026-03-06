@@ -47,10 +47,9 @@ class DataInfo:
     dataloader: DataLoader
     sampler: DistributedSampler  # 可能是None（非分布式模式）
     dataset: OSSFileImageNetDataset
-    epoch_id: int
 
 
-def get_dataset(cfg, is_train, epoch_id=0):
+def get_dataset(cfg, is_train):
     if is_train:
         root = cfg.data.train_root
     else:
@@ -83,17 +82,17 @@ def get_dataset(cfg, is_train, epoch_id=0):
     dataloader.num_samples = dataset.dataset_len
     dataloader.num_batches = len(dataloader)
 
-    return DataInfo(dataloader, sampler, dataset, epoch_id)
+    return DataInfo(dataloader, sampler, dataset)
 
 
-def get_data(cfg, epoch_id=0):
+def get_data(cfg):
     data = {}
 
     # 重建数据
     if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
         print('preparing recon data...')
     if cfg.data.train_root:
-        data["recon"] = get_dataset(cfg, is_train=True, epoch_id=epoch_id)
+        data["recon"] = get_dataset(cfg, is_train=True)
 
     def update_data_with_conflict_check(data, new_data):
         # 检查重名的键

@@ -6,7 +6,6 @@
 @Function:
 """
 
-import argparse
 import datetime
 import json
 import math
@@ -14,6 +13,7 @@ import os
 import random
 import sys
 import time
+from pprint import pprint
 
 import numpy as np
 import torch
@@ -28,46 +28,8 @@ from utils import logger
 from utils.configs_utils import get_config
 from utils.optim_factory import get_param_groups
 
-
-def parse_arguments():
-    """parse argument"""
-    parser = argparse.ArgumentParser('RQVAE training', add_help=False)
-    parser.add_argument('--cfg', default='configs/rqvae_i2v.yml', type=str)
-    parser.add_argument('--output_dir', default='', help='Storage path')
-    parser.add_argument("--tables", default='', help="ODPS table path")
-    parser.add_argument('--resume', default='', help='Recovery checkpoint path')
-    parser.add_argument('--train_root', default='', help='Training data root directory')
-    parser.add_argument('--epochs', default=0, type=int, help='Number of training epochs')
-
-    # 设备与分布式：在前面指定 device_type，后续代码设备无关
-    parser.add_argument('--device_type', default='', type=str, choices=['cuda', 'npu', ''],
-                        help='Device: cuda or npu. Default from config.')
-    parser.add_argument('--world_size', default=1, type=int, help='Number of distributed processes')
-    parser.add_argument('--rank', default=0, type=int, help='')
-    parser.add_argument('--gpu', default=0, type=int, help='')
-    parser.add_argument('--local-rank', default=-1, type=int,
-                        help="Local ranking in distributed training. Automatically imported by PAI or XDL launcher")
-    parser.add_argument('--dist_url', default='env://', help='Set the URL for distributed training')
-    parser.add_argument('--distributed', action='store_true', help='Whether to enable distributed training')
-    parser.add_argument('--save_prefix', default='', help="Save Prefix, default use config's data.save_prefix")
-
-    return parser.parse_args()
-
-
-def gather_tensors(tensor):
-    """gather tensors on all processes"""
-    world_size = dist.get_world_size()
-    with torch.no_grad():
-        tensors_list = [torch.zeros_like(tensor) for _ in range(world_size)]
-        dist.all_gather(tensors_list, tensor)
-    gathered_tensor = torch.cat(tensors_list, dim=0)
-    return gathered_tensor
-
-
-def initialize_training_environment(args, config):
-    """init environment"""
-    dist_utils.init_distributed_mode(config, args)
-    dist_utils.main_pprint(OmegaConf.to_object(config))
+# 配置文件路径：环境变量 CONFIG 或默认
+DEFAULT_CONFIG_PATH = 'configs/rqvae_i2v.yml'
 
 
 def create_model(config):
@@ -108,16 +70,6 @@ def create_model(config):
     model_instance = RQVAE_EMBED_CLIP(hps=hps, ddconfig=ddconfig, checkpointing=True)
 
     return model_instance
-
-
-def _to_numpy_array(x):
-    """统一转换为numpy数组"""
-    if isinstance(x, torch.Tensor):
-        return x.cpu().numpy()
-    elif isinstance(x, np.ndarray):
-        return x
-    else:
-        return np.array(x)
 
 
 def compute_codebook_utilization(all_codes: np.ndarray, codebook_sizes: list):
@@ -183,7 +135,7 @@ def compute_non_collision_rate(all_codes: np.ndarray, sample_ratio=1.0):
 
 def prepare_optimizer_and_scheduler(config, model_without_ddp):
     """Prepare the optimizer and learning rate scheduler"""
-    effective_batch_size = config.data.batch_size * config.train.accum_iter * dist_utils.get_world_size()
+    effective_batch_size = config.data.batch_size * config.train.accum_iter * (dist.get_world_size() if dist.is_initialized() else 1)
 
     # config.output_dir += f"{config.data.save_prefix}_ebs{effective_batch_size}_lr{config.train.lr}_ep{config.train.epochs}"
 
@@ -209,30 +161,27 @@ def prepare_optimizer_and_scheduler(config, model_without_ddp):
 
 def main():
     """main entrance"""
-    args = parse_arguments()
-    cfg = get_config(args)
+    config_path = os.environ.get('CONFIG', DEFAULT_CONFIG_PATH)
+    cfg = get_config(config_path)
 
-    initialize_training_environment(args=args, config=cfg)
+    dist_utils.init_distributed_mode(cfg)
+    if dist_utils.is_main_process():
+        pprint(OmegaConf.to_object(cfg))
 
-    # 设备在入口统一指定，后续全部使用 device，与 cuda/npu 解耦
-    device = dist_utils.get_device(cfg)
+    device = torch.device(f'npu:{getattr(cfg.dist, "npu_id", 0)}')
 
-    seed = cfg.seed + dist_utils.get_rank()
+    seed = cfg.seed + (dist.get_rank() if dist.is_initialized() else 0)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if device.type == 'cuda':
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.benchmark = True
-    elif device.type == 'npu':
-        torch.npu.manual_seed(seed)
+    torch.npu.manual_seed(seed)
 
     OmegaConf.set_readonly(cfg, False)
     current_timestamp_seconds = int(time.time())
     formatted_timestamp = datetime.datetime.fromtimestamp(current_timestamp_seconds).strftime('%Y%m%d_%H%M%S')
     cfg.output_dir += f"{cfg.data.save_prefix}_bs{cfg.data.batch_size}_lr{cfg.train.lr}_ep{cfg.train.epochs}_{formatted_timestamp}"
 
-    if dist_utils.get_rank() == 0:
+    if dist_utils.is_main_process():
         os.makedirs(cfg.output_dir, exist_ok=True)
         config_dict = OmegaConf.to_container(cfg, resolve=True)
         with open(os.path.join(cfg.output_dir, 'config.json'), 'w') as file_handle:
@@ -260,11 +209,9 @@ def main():
 
     if cfg.dist.distributed:
         dist_utils.main_print("Model distributed data parallelism")
-        # device_ids 使用本地设备 ID（LOCAL_RANK），对于 NPU 和 CUDA 都适用
-        # cfg.dist.gpu 在 init_distributed_mode 中已设置为 LOCAL_RANK
         model = torch.nn.parallel.DistributedDataParallel(
             module=model,
-            device_ids=[cfg.dist.gpu],  # LOCAL_RANK，节点内的设备 ID
+            device_ids=[cfg.dist.npu_id],
             find_unused_parameters=True
         )
         # 保证 device 指向 DDP 所在设备
@@ -275,9 +222,8 @@ def main():
     # -----------------------------------------------------------------------------------------------
     # Initialize dataset and dataloader
     dist_utils.main_print("Creating dataset and data loader...")
-    # 检查实际使用的数据源：train_root（npz 文件）或 tables（ODPS 表，未实现）
-    assert cfg.data.train_root or len(cfg.data.tables) > 0, 'No Data! Please specify train_root or tables.'
-    data = get_data(cfg=cfg, epoch_id=0)
+    assert cfg.data.train_root, 'No Data! Please specify data.train_root in config.'
+    data = get_data(cfg=cfg)
     for key in data:
         dist_utils.main_print(f"The size of the training dataset {key}: {len(data[key].dataset)}")
 
@@ -336,7 +282,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
                     epoch: int, cfg=None, device=None):
     """
     Executes a training epoch.
-    device: 由入口 get_device(cfg) 传入，本函数内仅使用 .to(device)，与 cuda/npu 解耦。
+    device: 由入口传入（main 中根据 cfg.dist.npu_id 构造的 npu device），本函数内仅使用 .to(device)。
     """
     if device is None:
         device = next(model.parameters()).device
@@ -348,13 +294,6 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
     model.train(True)
     accum_iter = cfg.train.accum_iter
     
-    # 用于统计商品冲突率和码本利用率
-    # 统计频率从config读取，默认每10个epoch统计一次
-    eval_cfg = getattr(cfg, 'eval', None)
-    stats_freq = getattr(eval_cfg, 'stats_freq', 10) if eval_cfg else 10  # 每N个epoch统计一次
-    collision_sample_ratio = getattr(eval_cfg, 'collision_sample_ratio', 0.1) if eval_cfg else 0.1
-    collect_stats = (stats_freq > 0 and (epoch % stats_freq == 0 or epoch == cfg.train.epochs - 1))
-
     dataloader, sampler = data['recon'].dataloader, data['recon'].sampler
     data_iter = iter(dataloader)
     if sampler is not None:
@@ -386,9 +325,6 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             metric_logger.log_every_list_with_datasetname(data_iter_list, num_batches_per_epoch_list, dataset_names,
                                                           print_freq, epoch,
                                                           header)):
-        # if data_iter_step >= 100:
-        #     dist_utils.main_print(f'Debug mode: reached max iter')
-        #     break    
 
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / num_batches_per_epoch + epoch, cfg)
@@ -414,7 +350,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             lr = optimizer.param_groups[0]["lr"]
             lr2 = optimizer.param_groups[-1]["lr"]
 
-            dist_utils.device_synchronize(device)
+            torch.npu.synchronize()
 
             log_metrics = {
                 f"loss/loss": loss_value,
@@ -444,7 +380,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             # 计算准确率
             acc = output['clip_acc'].item()
 
-            model_unwrapped = dist_utils.get_model(model)
+            model_unwrapped = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
             temperature = model_unwrapped.logit_scale.item()
             temperature_self = model_unwrapped.logit_scale_self.item()
             temperature_cl = model_unwrapped.logit_scale_cl.item()
@@ -461,7 +397,7 @@ def train_one_epoch(model: torch.nn.Module, data: dict, optimizer: torch.optim.O
             loss.backward()
             optimizer.step()
 
-            dist_utils.device_synchronize(device)
+            torch.npu.synchronize()
 
             lr = optimizer.param_groups[0]["lr"]
 
@@ -544,7 +480,7 @@ def evaluate(model, data, cfg, device):
         drop_last=False
     )
     
-    model_unwrapped = dist_utils.get_model(model)
+    model_unwrapped = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     local_codes = []
 
     # ===== 1. 每个进程本地算 codes =====
@@ -564,7 +500,7 @@ def evaluate(model, data, cfg, device):
     local_codes = torch.cat(local_codes, dim=0)  # [N_local, num_layers]
 
     # ===== 2. DDP 下收集所有 rank 的 codes（支持变长） =====
-    if dist_utils.is_dist_avail_and_initialized():
+    if dist.is_initialized():
         world_size = dist.get_world_size()
 
         local_len = torch.tensor([local_codes.shape[0]], device=device)

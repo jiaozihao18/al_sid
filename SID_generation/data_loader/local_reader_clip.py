@@ -52,10 +52,9 @@ class DataInfo:
     dataloader: DataLoader
     sampler: DistributedSampler  # 可能是None（非分布式模式）
     dataset: OSSFileImageNetDataset
-    epoch_id: int
 
 
-def get_dataset(root, cfg, is_train, epoch_id=0):
+def get_dataset(root, cfg, is_train):
     assert root is not None
 
     dataset = OSSFileImageNetDataset(
@@ -84,37 +83,37 @@ def get_dataset(root, cfg, is_train, epoch_id=0):
     dataloader.num_samples = dataset.dataset_len
     dataloader.num_batches = len(dataloader)
 
-    return DataInfo(dataloader, sampler, dataset, epoch_id)
+    return DataInfo(dataloader, sampler, dataset)
 
 
-def get_data(cfg, epoch_id=0):
+def get_data(cfg):
     data = {}
 
     if cfg.data.train_clip:
         if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
             print('preparing train_clip data...')
-        data["train"] = get_dataset(cfg.data.train_clip, cfg, is_train=True, epoch_id=epoch_id)
+        data["train"] = get_dataset(cfg.data.train_clip, cfg, is_train=True)
 
     if len(cfg.data.train_clip2) > 1:
         if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
             print('preparing train_clip2 data...')
-        data["train2"] = get_dataset(cfg.data.train_clip2, cfg, is_train=True, epoch_id=epoch_id)
+        data["train2"] = get_dataset(cfg.data.train_clip2, cfg, is_train=True)
 
     if len(cfg.data.train_clip3) > 1:
         if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
             print('preparing train_clip3 data...')
-        data["train3"] = get_dataset(cfg.data.train_clip3, cfg, is_train=True, epoch_id=epoch_id)
+        data["train3"] = get_dataset(cfg.data.train_clip3, cfg, is_train=True)
 
     return data
 
 
-def get_i2idata_list(path_list, cfg, epoch_id=0):
+def get_i2idata_list(path_list, cfg):
     data = {}
 
     for path in path_list:
         if not dist.is_initialized() or dist.get_rank() == 0:  # 只在主进程打印
             print(f'preparing {path} data...')
         data_name = path.split('/')[-1].split('.')[0]
-        data[data_name] = get_dataset(path, cfg, is_train=True, epoch_id=epoch_id)
+        data[data_name] = get_dataset(path, cfg, is_train=True)
 
     return data

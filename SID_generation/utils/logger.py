@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .dist_utils import is_dist_avail_and_initialized, is_main_process
+from .dist_utils import is_main_process
 
 
 def _get_device_for_tensor(device):
@@ -53,7 +53,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
     def synchronize(self, device=None):
-        if not is_dist_avail_and_initialized():
+        if not (dist.is_available() and dist.is_initialized()):
             return
         dev = _get_device_for_tensor(device)
         t = torch.tensor([self.sum, self.count], dtype=torch.float32, device=dev)
@@ -113,7 +113,7 @@ class SmoothedValue(object):
         Warning: does not synchronize the deque!
         device: 与训练 device 一致，用于 all_reduce 的 tensor 所在设备。
         """
-        if not is_dist_avail_and_initialized():
+        if not (dist.is_available() and dist.is_initialized()):
             return
         dev = _get_device_for_tensor(device)
         t = torch.tensor([self.count, self.total], dtype=torch.float32, device=dev)

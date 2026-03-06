@@ -110,7 +110,6 @@ if __name__ == "__main__":
     parser.add_argument('--cfg', default='configs/rqvae_i2v.yml', type=str)
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--output_dir', default='', help='path where to save on oss')
-    parser.add_argument("--tables", default='', help="Path to ODPS table with training data")
     parser.add_argument('--resume', default='', help='Resumed checkpoint path')
     parser.add_argument('--train_root', default='', help='training data')
     parser.add_argument('--epochs', default=0, type=int, help='training epochs')

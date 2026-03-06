@@ -357,7 +357,7 @@ class RQBottleneck(nn.Module):
         # move to gpu
         device = self.device
         embeds = [e.to(device) for e in embeds]
-        if dist_utils.is_dist_avail_and_initialized():
+        if dist.is_initialized():
             embeds = dist_utils.scaled_all_reduce(embeds)
 
         for idx in range(len(self.n_embed)):

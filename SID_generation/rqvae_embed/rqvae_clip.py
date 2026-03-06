@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
@@ -257,7 +258,7 @@ class CLIPLoss(nn.Module):
         local_batch_size = image_embed.size(0)
 
         if local_batch_size != self.last_local_batch_size:
-            self.labels = local_batch_size * dist_utils.get_rank() + torch.arange(
+            self.labels = local_batch_size * (dist.get_rank() if dist.is_initialized() else 0) + torch.arange(
                 local_batch_size, device=image_embed.device
             )
             self.last_local_batch_size = local_batch_size
