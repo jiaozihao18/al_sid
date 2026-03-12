@@ -6,14 +6,28 @@ from .log import logger
 import copy
 import numpy as np
 from utils.predict import PredictWriter, create_predict_writer
+from torch.utils.data import DataLoader
+
+from utils.mixed_batch_dataset import AlternatingBatchIterable
+import inspect
 
 class GRSTrainer(Seq2SeqTrainer):
 
     predict_output: Optional[Dict[str, Any]] = None
     predict_writer: Optional[PredictWriter] = None
+    ldpo_train_dataset: Optional[Any] = None
+    ldpo_data_collator: Optional[Any] = None
+    ldpo_ratio: float = 0.5
+    ldpo_seed: int = 42
+    ldpo_start_with: str = "ce"
 
     def __init__(self,
                  predict_output: Optional[Dict[str, Any]] = None,
+                 ldpo_train_dataset: Optional[Any] = None,
+                 ldpo_data_collator: Optional[Any] = None,
+                 ldpo_ratio: float = 0.5,
+                 ldpo_seed: int = 42,
+                 ldpo_start_with: str = "ce",
                  **kwargs):
 
         model = kwargs.get('model')
@@ -30,6 +44,11 @@ class GRSTrainer(Seq2SeqTrainer):
         super(GRSTrainer, self).__init__(**kwargs)
         self.predict_output = None
         self.predict_writer = None
+        self.ldpo_train_dataset = ldpo_train_dataset
+        self.ldpo_data_collator = ldpo_data_collator
+        self.ldpo_ratio = ldpo_ratio
+        self.ldpo_seed = ldpo_seed
+        self.ldpo_start_with = ldpo_start_with
 
         if self.args.do_predict:
             self.predict_output = predict_output
@@ -42,6 +61,57 @@ class GRSTrainer(Seq2SeqTrainer):
                                      f"may you should set {'predict_with_generate=True' if not self.args.predict_with_generate else 'prediction_loss_only=False'}")
             if not self.args.remove_unused_columns:
                 self.accelerator.device_placement = False
+
+    def get_train_dataloader(self) -> DataLoader:
+        """
+        支持交替训练：
+        - 默认：与 HF Seq2SeqTrainer 相同
+        - 若传入 ldpo_train_dataset + ldpo_data_collator：构建 CE/LDPO 两个内部 DataLoader，
+          然后用 Iterable 交替产出 batch。
+        """
+        if self.ldpo_train_dataset is None or self.ldpo_data_collator is None:
+            return super().get_train_dataloader()
+
+        # 1) CE dataloader：沿用 Trainer 的默认逻辑（含 sampler / drop_last 等）
+        ce_loader = super().get_train_dataloader()
+
+        # 2) LDPO dataloader：复用 Trainer 的 sampler 逻辑（DistributedSampler 等）
+        #    这里不能复用 super().get_train_dataloader()，因为那会绑到 self.train_dataset；
+        #    因此手动构建，尽量对齐 Trainer 的常见参数。
+        # transformers 不同版本 _get_train_sampler 的签名不一致，这里做兼容：
+        # - 新版：_get_train_sampler(train_dataset)
+        # - 旧版：_get_train_sampler()
+        try:
+            sig = inspect.signature(self._get_train_sampler)
+            if len(sig.parameters) >= 1:
+                ldpo_sampler = self._get_train_sampler(self.ldpo_train_dataset)
+            else:
+                ldpo_sampler = self._get_train_sampler()
+        except Exception:
+            ldpo_sampler = None
+
+        ldpo_loader = DataLoader(
+            self.ldpo_train_dataset,
+            batch_size=self._train_batch_size,
+            sampler=ldpo_sampler,
+            collate_fn=self.ldpo_data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            persistent_workers=self.args.dataloader_persistent_workers,
+        )
+
+        mixed_iterable = AlternatingBatchIterable(
+            ce_iterable=ce_loader,
+            ldpo_iterable=ldpo_loader,
+            ldpo_ratio=float(self.ldpo_ratio),
+            seed=int(self.ldpo_seed),
+            start_with=str(self.ldpo_start_with),
+        )
+
+        # 3) 用 batch_size=None 的 DataLoader 包一层，让 Trainer 以为这是“一个 dataloader”
+        mixed_loader = DataLoader(mixed_iterable, batch_size=None)
+        return mixed_loader
 
     ## Generation Process:
     # 1. Define a writer based on the predict_output setting

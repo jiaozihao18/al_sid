@@ -28,6 +28,8 @@ class LDPODataCollator(DataCollatorMixin):
 
     tokenizer: PreTrainedTokenizerBase
     padding: bool = True
+    # 若为 True，则在 batch 中注入 ldpo_only=True，使模型 loss 跳过 CE，仅优化 LDPO。
+    ldpo_only: bool = False
 
     def __call__(self, features: List[Dict[str, Any]], return_tensors: Optional[str] = None) -> Dict[str, Any]:
         # 1. 计算 batch 内的最大长度，用于 padding
@@ -132,6 +134,9 @@ class LDPODataCollator(DataCollatorMixin):
             # 其它位置保持为 minv
 
         batch["attention_mask"] = attention_mask
+
+        if self.ldpo_only:
+            batch["ldpo_only"] = True
 
         return batch
 

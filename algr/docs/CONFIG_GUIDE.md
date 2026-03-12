@@ -72,6 +72,22 @@
 | `instruction_column` / `input_column` / `output_column` | 数据列名（非 pretrain 时） |
 | `predict_output` | 推理输出配置（`do_predict` 时） |
 
+### 5.1 交替训练（CE 数据 + LDPO 数据）
+
+当你希望「原始数据只训练 NTP/CE」，并且「另一份数据用于 IAP+LDPO」时，可在 `custom_args` 中额外配置：
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `ldpo_data_file` | LDPO 训练数据路径（csv 或 dataset 映射） | 不启用 |
+| `ldpo_ratio` | 每个 step 采样 LDPO batch 的概率 | `0.5` |
+| `ldpo_seed` | 交替采样的随机种子（所有 rank 一致） | `42` |
+| `ldpo_start_with` | 第一个 batch 从哪种数据开始：`"ce"` / `"ldpo"` | `"ce"` |
+| `ldpo_only` | 若为 `true`，LDPO batch **跳过 CE**，只优化 LDPO（需 `ldpo_alpha>0` 才有效） | `false` |
+
+注意：
+- 启用交替训练后会强制 `training_args.remove_unused_columns=false`，以保留 `ldpo_*` 字段用于 loss 计算。
+- CE 数据按默认对话模板处理；LDPO 数据强制按 `training_mode="iap_ldpo"` 的预处理与 collator 处理（包括 4D item-aware attention mask）。
+
 ---
 
 ## 6. 配置示例

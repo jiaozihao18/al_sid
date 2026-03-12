@@ -51,8 +51,10 @@ class Runner:
         self.gen_kwargs = None
 
         self.train_dataset = None
+        self.ldpo_train_dataset = None
         self.test_dataset = None
         self.preprocess_function = None
+        self.ldpo_preprocess_function = None
 
         self.trainer = None
         self.is_train = (self.training_args.do_train is True)
@@ -97,6 +99,16 @@ class Runner:
             from models.t5.data import T5DataProcess as DataProcess
         preprocess_function = DataProcess(self.custom_args, self.tokenizer, self.is_train)
         return preprocess_function
+
+    def _create_preprocess_with_mode(self, training_mode: str):
+        if self.config.model_type == 'qwen2_5':
+            from models.qwen2_5.data import QwenDataProcess as DataProcess
+        elif self.config.model_type == 't5':
+            from models.t5.data import T5DataProcess as DataProcess
+        # clone custom_args but override training_mode
+        cloned = EasyDict(dict(self.custom_args))
+        cloned.training_mode = training_mode
+        return DataProcess(cloned, self.tokenizer, self.is_train)
         
     def create_model(self):
         ## Create model according to self.config
@@ -146,6 +158,37 @@ class Runner:
         dataset_name = self.config.dataset_name
         data_file = self.config.data_file
         if self.is_train:
+            # 交替训练：原始数据用于 CE；额外数据用于 IAP+LDPO
+            ldpo_data_file = getattr(self.custom_args, "ldpo_data_file", None)
+            if ldpo_data_file:
+                # 强制保留额外字段（否则 Trainer 会把 ldpo_* 列删掉，导致 loss 退化）
+                self.training_args.remove_unused_columns = False
+
+                print(f"📊 loading CE dataset...")
+                if os.path.isfile(data_file):
+                    dataset_ce = load_dataset("csv", data_files=data_file, split="train", streaming=self.config.streaming)
+                else:
+                    dataset_ce = load_dataset(dataset_name, data_files=data_file, split="train", streaming=self.config.streaming)
+
+                print(f"📊 loading LDPO dataset...")
+                if os.path.isfile(ldpo_data_file):
+                    dataset_ldpo = load_dataset("csv", data_files=ldpo_data_file, split="train", streaming=self.config.streaming)
+                else:
+                    dataset_ldpo = load_dataset(dataset_name, data_files=ldpo_data_file, split="train", streaming=self.config.streaming)
+
+                print("🔄 processing CE dataset...")
+                preprocess_ce = self._create_preprocess_with_mode(training_mode=None)
+                dataset_ce = dataset_ce.filter(preprocess_ce.filter_fn)
+                tokenized_ce = dataset_ce.map(preprocess_ce, batched=False, remove_columns=["system", "user", "answer"])
+
+                print("🔄 processing LDPO dataset...")
+                preprocess_ldpo = self._create_preprocess_with_mode(training_mode="iap_ldpo")
+                dataset_ldpo = dataset_ldpo.filter(preprocess_ldpo.filter_fn)
+                tokenized_ldpo = dataset_ldpo.map(preprocess_ldpo, batched=False, remove_columns=["system", "user", "answer"])
+
+                self.ldpo_train_dataset = tokenized_ldpo
+                return tokenized_ce, None
+
             print(f"📊 loading dataset...")
             if os.path.isfile(data_file):
                 dataset = load_dataset("csv", data_files=data_file, split="train", streaming=self.config.streaming)
@@ -169,10 +212,24 @@ class Runner:
             return None, tokenized_test
 
     def create_data_collator(self):
-        # IAP+LDPO 训练模式使用自定义 collator，产出 4D item-aware attention mask
+        # 交替训练：同时构建两套 collator，CE 用默认，LDPO 用专用 4D mask collator
+        if getattr(self.custom_args, "ldpo_data_file", None):
+            from utils.ldpo_data_collator import LDPODataCollator
+            self.ldpo_data_collator = LDPODataCollator(
+                tokenizer=self.tokenizer,
+                padding=True,
+                ldpo_only=bool(getattr(self.custom_args, "ldpo_only", False)),
+            )
+            return DataCollatorForSeq2Seq(tokenizer=self.tokenizer, model=self.model, padding=True)
+
+        # IAP+LDPO 单一模式：使用自定义 collator，产出 4D item-aware attention mask
         if getattr(self.custom_args, "training_mode", None) == "iap_ldpo":
             from utils.ldpo_data_collator import LDPODataCollator
-            data_collator = LDPODataCollator(tokenizer=self.tokenizer, padding=True)
+            data_collator = LDPODataCollator(
+                tokenizer=self.tokenizer,
+                padding=True,
+                ldpo_only=bool(getattr(self.custom_args, "ldpo_only", False)),
+            )
             return data_collator
 
         data_collator = DataCollatorForSeq2Seq(tokenizer=self.tokenizer, model=self.model, padding=True)
@@ -214,6 +271,14 @@ class Runner:
             "tokenizer": self.tokenizer,
             "predict_output":self.predict_output
         }
+
+        # 交替训练参数：如果提供了 LDPO 数据集，则传入 Trainer 以构建混合 dataloader
+        if getattr(self.custom_args, "ldpo_data_file", None):
+            kwargs["ldpo_train_dataset"] = self.ldpo_train_dataset
+            kwargs["ldpo_data_collator"] = getattr(self, "ldpo_data_collator", None)
+            kwargs["ldpo_ratio"] = float(getattr(self.custom_args, "ldpo_ratio", 0.5))
+            kwargs["ldpo_seed"] = int(getattr(self.custom_args, "ldpo_seed", 42))
+            kwargs["ldpo_start_with"] = str(getattr(self.custom_args, "ldpo_start_with", "ce"))
 
         ## loss function
         compute_loss_func = self.create_compute_loss_func()

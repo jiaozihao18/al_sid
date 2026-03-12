@@ -85,4 +85,10 @@ def init_distributed_mode(device_type: str, args):
         backend = 'nccl'
 
     dist.init_process_group(backend=backend, timeout=timedelta(seconds=1800))
+    # 多进程下仅 rank0 打印，避免 log/print 重复刷屏
+    try:
+        setup_for_distributed(is_master=(dist.get_rank() == 0))
+    except Exception:
+        # 若某些环境下 get_rank 不可用，则保持默认行为
+        pass
     return True

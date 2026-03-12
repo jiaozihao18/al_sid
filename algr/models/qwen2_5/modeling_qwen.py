@@ -1294,14 +1294,21 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         logits_next = logits[:, :-1, :]  # [B, L-1, V]
         target = labels[:, 1:]           # [B, L-1]
 
-        ce_loss = F.cross_entropy(
-            logits_next.reshape(-1, V),
-            target.reshape(-1),
-            ignore_index=LabelSmoother.ignore_index,
-            reduction="mean",
-        )
+        # ldpo_only=True 时跳过 CE（只优化 LDPO）。默认仍为联合 loss。
+        ldpo_only = bool(kwargs.get("ldpo_only", False))
+        if ldpo_only:
+            ce_loss = logits.new_zeros(())
+        else:
+            ce_loss = F.cross_entropy(
+                logits_next.reshape(-1, V),
+                target.reshape(-1),
+                ignore_index=LabelSmoother.ignore_index,
+                reduction="mean",
+            )
 
-        # 如果没有 LDPO 相关字段，则直接返回 NTP loss
+        # 如果没有 LDPO 相关字段：
+        # - 默认返回 CE
+        # - 若 ldpo_only=True，则退化为 0（不优化任何项，避免意外把 CE 关掉但又没传 LDPO 字段）
         if "ldpo_item_index" not in kwargs or "ldpo_item_groups" not in kwargs:
             return ce_loss
 
