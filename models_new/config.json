@@ -1,0 +1,30 @@
+{
+    "model_name_or_path": "Qwen/Qwen2.5-0.5B",
+  
+    "data_file": "/path/to/ce_data.csv",
+  
+    "ldpo_data_file": "/path/to/ldpo_data.csv",
+    "ldpo_ratio": 0.5,
+    "ldpo_only": true,
+  
+    "instruction_column": "system",
+    "input_column": "user",
+    "output_column": "answer",
+  
+    "max_length": 1068,
+    "max_source_length": 1024,
+    "max_target_length": 32,
+    "ldpo_m": 3,
+  
+    "max_steps": -1,
+    "training_args": {
+      "output_dir": "./outputs/rec_qwen_ldpo",
+      "per_device_train_batch_size": 4,
+      "gradient_accumulation_steps": 1,
+      "learning_rate": 5e-5,
+      "num_train_epochs": 3,
+      "logging_steps": 10,
+      "save_steps": -1,
+      "remove_unused_columns": false
+    }
+  }
