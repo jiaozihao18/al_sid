@@ -14,7 +14,7 @@ def setup_for_distributed(is_master: bool):
     __builtin__.print = print
 
 
-def init_distributed_mode(device_type: str, args):
+def init_distributed_mode(npu_id: int = 0):
     """
     初始化分布式环境（仅支持 NPU）：
     - 若 RANK / WORLD_SIZE 未设置，则单进程运行，不创建 process_group。
@@ -24,7 +24,7 @@ def init_distributed_mode(device_type: str, args):
     import torch.distributed as dist
     from datetime import timedelta
 
-    local_rank = int(os.environ.get("LOCAL_RANK", getattr(args, "local_rank", 0)))
+    local_rank = int(os.environ.get("LOCAL_RANK", npu_id))
     local_rank = max(local_rank, 0)
 
     if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:

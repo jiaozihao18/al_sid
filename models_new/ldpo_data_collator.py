@@ -2,12 +2,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import torch
-from transformers.trainer_pt_utils import LabelSmoother
 from transformers.data.data_collator import DataCollatorMixin
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-IGNORE_INDEX = LabelSmoother.ignore_index
+IGNORE_INDEX = -100
 
 
 @dataclass
@@ -15,14 +14,13 @@ class LDPODataCollator(DataCollatorMixin):
     """为 LDPO 构造 4D item-aware attention mask 的 collator。"""
     tokenizer: PreTrainedTokenizerBase
     padding: bool = True
-    ldpo_only: bool = False
 
     def __call__(self, features: List[Dict[str, Any]], return_tensors: Optional[str] = None) -> Dict[str, Any]:
         max_length = max(len(f["input_ids"]) for f in features)
 
         pad_token_id = self.tokenizer.pad_token_id
         if pad_token_id is None:
-            pad_token_id = 0
+            pad_token_id = self.tokenizer.eos_token_id
 
         batch_input_ids: List[List[int]] = []
         batch_labels: List[List[int]] = []
@@ -30,6 +28,7 @@ class LDPODataCollator(DataCollatorMixin):
         batch_item_groups: List[Optional[List[int]]] = []
         batch_num_items: List[Optional[int]] = []
         batch_m: List[Optional[int]] = []
+        batch_sample_type: List[int] = []
 
         for f in features:
             input_ids: List[int] = f["input_ids"]
@@ -55,6 +54,7 @@ class LDPODataCollator(DataCollatorMixin):
             batch_item_groups.append(f.get("ldpo_item_groups"))
             batch_num_items.append(f.get("ldpo_num_items"))
             batch_m.append(f.get("ldpo_m"))
+            batch_sample_type.append(int(f.get("sample_type", 0)))
 
         input_ids_tensor = torch.tensor(batch_input_ids, dtype=torch.long)
         labels_tensor = torch.tensor(batch_labels, dtype=torch.long)
@@ -64,9 +64,10 @@ class LDPODataCollator(DataCollatorMixin):
             "input_ids": input_ids_tensor,
             "labels": labels_tensor,
             "ldpo_item_index": item_index_tensor,
+            "sample_type": torch.tensor(batch_sample_type, dtype=torch.long),
         }
 
-        valid_groups = [g for g in batch_item_groups if g is not None]
+        valid_groups = [g for g in batch_item_groups if g is not None and len(g) > 0]
         if valid_groups:
             max_items = max(len(g) for g in valid_groups)
             groups_tensor = torch.zeros((len(features), max_items), dtype=torch.long)
@@ -114,9 +115,6 @@ class LDPODataCollator(DataCollatorMixin):
             mask_2d[allowed] = 0.0
 
         batch["attention_mask"] = attention_mask
-
-        if self.ldpo_only:
-            batch["ldpo_only"] = True
 
         return batch
 
